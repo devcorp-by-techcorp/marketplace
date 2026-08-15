@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-hooks.json",
+  "hooks": {
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/hooks/subagent-verification-gate.sh",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

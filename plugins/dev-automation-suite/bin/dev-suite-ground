@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# dev-suite-ground — bare command wrapper for ground_file.py.
+# Defaults --project-root to CLAUDE_PROJECT_DIR when not given explicitly.
+set -euo pipefail
+SUITE_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+args=("$@")
+if [[ ! " ${args[*]-} " =~ " --project-root " ]]; then
+    args=(--project-root "${CLAUDE_PROJECT_DIR:-$PWD}" ${args[@]+"${args[@]}"})
+fi
+exec "${PYTHON_BIN:-python3}" "${SUITE_ROOT}/scripts/ground_file.py" ${args[@]+"${args[@]}"}

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "techcorp-plugins",
+  "description": "Internal marketplace for TechCorp's Claude Code plugins. Hosts the development automation suite and any future internal plugins.",
+  "owner": {
+    "name": "TechCorp"
+  },
+  "plugins": [
+    {
+      "name": "dev-automation-suite",
+      "displayName": "Development Automation Suite",
+      "source": "./",
+      "description": "Autonomous development across an eleven-phase lifecycle with script-enforced quality gates. Blocks unverified agent deliveries at SubagentStop, halts on breaking changes and unvalidated premises, rejects band-aid fixes, and detects the project stack instead of assuming it. Local files and CLI only — no external services.",
+      "author": {
+        "name": "TechCorp"
+      },
+      "license": "Apache-2.0",
+      "category": "development",
+      "keywords": [
+        "development-workflow",
+        "quality-gates",
+        "agent-verification",
+        "code-review",
+        "breaking-change-detection",
+        "orchestration"
+      ],
+      "tags": [
+        "workflow",
+        "quality",
+        "verification",
+        "automation"
+      ]
+    }
+  ],
+  "renames": {}
+}

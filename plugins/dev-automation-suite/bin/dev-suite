@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# dev-suite — bare command wrapper for the suite orchestrator.
+#
+# Plugin `bin/` files are added to the Bash tool's PATH while the plugin is
+# enabled, so this is invokable as `dev-suite` with no path prefix.
+#
+# Resolves the suite root from this script's own location rather than
+# CLAUDE_PLUGIN_ROOT, so it also works when run directly from a checkout.
+set -euo pipefail
+SUITE_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+exec "${PYTHON_BIN:-python3}" "${SUITE_ROOT}/scripts/suite_orchestrator.py" "$@"

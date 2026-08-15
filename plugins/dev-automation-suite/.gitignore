@@ -1,0 +1,4 @@
+# Runtime state and logs belong in the target project, not the package
+.dev-suite/
+__pycache__/
+*.pyc

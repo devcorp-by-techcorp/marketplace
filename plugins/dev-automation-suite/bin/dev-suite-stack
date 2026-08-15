@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# dev-suite-stack — bare command wrapper for stack profile detection.
+#
+# Defaults to CLAUDE_PROJECT_DIR, then the working directory, when no path is
+# given, so `dev-suite-stack --checklist` works with no arguments.
+set -euo pipefail
+SUITE_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+
+target=""
+args=()
+for arg in "$@"; do
+    case "$arg" in
+        -*) args+=("$arg") ;;
+        *)  [[ -z "$target" ]] && target="$arg" || args+=("$arg") ;;
+    esac
+done
+[[ -z "$target" ]] && target="${CLAUDE_PROJECT_DIR:-$PWD}"
+
+exec "${PYTHON_BIN:-python3}" "${SUITE_ROOT}/scripts/stack_profile.py" "$target" ${args[@]+"${args[@]}"}

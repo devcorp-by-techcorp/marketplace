@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# dev-suite-verify — bare command wrapper for the verification gate.
+#
+# Reads a verification block from a file argument or stdin and applies the
+# evidence rules. Exit codes: 0 approved, 1 blocked, 2 approved with warnings,
+# 3 no parseable block.
+set -euo pipefail
+SUITE_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+exec "${PYTHON_BIN:-python3}" "${SUITE_ROOT}/scripts/verification_gate.py" "$@"
