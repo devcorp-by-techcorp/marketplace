@@ -226,6 +226,26 @@ def _build_verification_gate(
     return argv
 
 
+def _build_review_packet(
+    script: Path,
+    target: Optional[str] = None,
+    project_root: Optional[str] = None,
+    **_ignored,
+) -> list[str]:
+    """``<script> check <packet> [--project-root <root>]``
+
+    Only the ``check`` subcommand is registered. ``record`` and ``build`` are
+    author-side steps that run before the reviewer exists; the orchestrator's
+    job is to refuse a review whose packet was never verified.
+    """
+    if not target:
+        raise RegistryError('target (review packet file) is required')
+    argv = [str(script), 'check', target]
+    if project_root:
+        argv += ['--project-root', project_root]
+    return argv
+
+
 # --------------------------------------------------------------------------
 # Registry entries
 # --------------------------------------------------------------------------
@@ -382,6 +402,16 @@ REGISTRY: dict[str, ScriptSpec] = {
         builder=_build_verification_gate,
         exit_map={0: PASS, 1: FAIL, 2: WARN},
         halts_on_fail=True,          # CONTRADICTED / security UNVERIFIED halts
+    ),
+    'review_packet': ScriptSpec(
+        name='review_packet',
+        filename='review_packet.py',
+        purpose='Verifies a review packet exposes only task and completed work',
+        lineage='dev-automation-suite',
+        phases=(3, 7),
+        builder=_build_review_packet,
+        exit_map={0: PASS, 1: FAIL, 3: ERROR},
+        halts_on_fail=True,   # a framed packet is not reviewable; halt, don't route
     ),
     'ground_file': ScriptSpec(
         name='ground_file',

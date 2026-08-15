@@ -1,0 +1,172 @@
+name: CI
+
+# What this guards, and why each check is here rather than left to review.
+#
+# The suite's own test suite is the substance — it already asserts the plugin
+# spec rules, the hook contracts, and the review-packet rules. CI's job is to
+# make sure it actually runs, on the interpreters the package claims to
+# support, from a *fresh clone* rather than a working tree that predates the
+# current state.
+#
+# That last part is not incidental. Every defect this repo has shipped so far
+# was invisible locally and only real after a clone: file modes that were never
+# committed, and a manifest whose path resolved differently from where it sat.
+# A checkout is the only honest test environment for a distributable plugin.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests (py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The floor the package advertises. Annotations are evaluated at
+          # definition time, so `-> list[str]` without a postponed-annotations
+          # import is a TypeError here and nowhere else — which is exactly how
+          # it went unnoticed. ubuntu-24.04 has no 3.8 in the tool cache.
+          - python: '3.8'
+            os: ubuntu-22.04
+          - python: '3.11'
+            os: ubuntu-latest
+          # The ceiling: catches deprecations before they become breakage.
+          - python: '3.13'
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Confirm no third-party packages are needed
+        # The package advertises standard library only. Installing nothing is
+        # the assertion — an import that needs a wheel fails in the next step.
+        run: python -c "import sys; print(sys.version)"
+
+      - name: Run the suite's tests
+        working-directory: plugins/dev-automation-suite
+        run: python tests/test_suite.py
+
+  packaging:
+    name: packaging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Executable bits survived the commit
+        # The failure that broke this package twice. A stripped mode is
+        # invisible in a working tree that predates it and fatal after a clone:
+        # the hook fails with permission denied and the gate silently stops
+        # gating. Asserted against the index, not the filesystem, because the
+        # index is what a user actually receives.
+        run: |
+          set -euo pipefail
+          fail=0
+          while read -r mode _ _ path; do
+            if [ "$mode" != "100755" ]; then
+              echo "::error file=$path::mode $mode, expected 100755 — run: git update-index --chmod=+x '$path'"
+              fail=1
+            fi
+          done < <(git ls-files -s \
+                     'plugins/*/bin/*' \
+                     'plugins/*/hooks/*.sh')
+          exit $fail
+
+      - name: No runtime state is tracked
+        # The suite writes .dev-suite/ into whatever project it runs against,
+        # and developing the plugin means running it against this one. Session
+        # logs carry agent output. .gitignore keeps them out; this catches a
+        # force-add, which is the only way past it.
+        run: |
+          set -euo pipefail
+          tracked=$(git ls-files '.dev-suite' '*/.dev-suite/*' '**/__pycache__/*' || true)
+          if [ -n "$tracked" ]; then
+            echo "::error::runtime state is tracked:"
+            echo "$tracked"
+            exit 1
+          fi
+          echo 'ok: no runtime state tracked'
+
+      - name: Manifests are well-formed JSON
+        run: |
+          set -euo pipefail
+          for manifest in $(git ls-files '*.claude-plugin/*.json'); do
+            python -c "import json,sys; json.load(open(sys.argv[1]))" "$manifest"
+            echo "ok: $manifest"
+          done
+
+      - name: Every marketplace source resolves to a plugin
+        # A source that resolves to the wrong directory installs a plugin with
+        # no components, and does it without erroring — the exact failure this
+        # repo shipped. Checked here as well as in the test suite because it is
+        # a property of the repository, not of any one plugin.
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+
+          root = pathlib.Path('.claude-plugin/marketplace.json')
+          catalog = json.loads(root.read_text())
+          failed = False
+          for entry in catalog['plugins']:
+              source = entry['source']
+              if not isinstance(source, str):
+                  continue           # remote sources are not ours to resolve
+              target = (root.parent.parent / source).resolve()
+              manifest = target / '.claude-plugin' / 'plugin.json'
+              if not manifest.is_file():
+                  print(f"::error::{entry['name']}: source {source!r} has no "
+                        f"plugin manifest at {manifest}")
+                  failed = True
+                  continue
+              declared = json.loads(manifest.read_text())['name']
+              if declared != entry['name']:
+                  print(f"::error::{entry['name']}: manifest at {source!r} "
+                        f"declares {declared!r} — installs under a slug its own "
+                        'manifest disowns')
+                  failed = True
+                  continue
+              print(f'ok: {entry["name"]} -> {source}')
+          sys.exit(1 if failed else 0)
+          PY
+
+  workflows:
+    name: plugin workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Workflow scripts parse, and load no modules
+        # The workflow runtime rejects a script containing import() before the
+        # run starts, so a script that only fails there fails after the user
+        # has already approved it.
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          found=0
+          for script in plugins/*/workflows/*.js; do
+            found=1
+            node --check "$script"
+            if grep -qE '\bimport\s*\(' "$script"; then
+              echo "::error file=$script::contains import(); the workflow runtime rejects it"
+              exit 1
+            fi
+            echo "ok: $script"
+          done
+          [ "$found" -eq 1 ] || echo 'no plugin workflows to check'

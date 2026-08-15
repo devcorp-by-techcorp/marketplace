@@ -1,4 +1,4 @@
-# Token Budgeting — Opus 4.7 Efficiency Strategies
+# Token Budgeting — Efficiency Strategies
 
 ## Table of Contents
 
@@ -14,16 +14,21 @@
 
 ## Overview
 
-Opus 4.7 uses a new tokenizer that produces 1.0–1.35× more tokens than
-previous models. At $5/$25 per MTok, cost control matters. The automate-dev
-skill applies a three-layer budgeting strategy:
+Autonomous loops spend tokens without anyone watching, which is exactly the
+condition under which a budget is worth having. The suite applies three layers:
 
 1. **Phase budgets** — cap tokens per workflow phase
 2. **Agent budgets** — cap tokens per agent invocation
-3. **Task budgets** — cap tokens per complete workflow run (via Opus 4.7's
-   task_budget feature)
+3. **Task budgets** — cap tokens per complete workflow run
 
-### Why Budgeting Matters for Opus 4.7
+**Every figure in this document is an estimate until measured.** Tokenizers
+differ between model generations, so a budget carried across a model change is
+a guess. Re-measure with `count_tokens` against the model actually in use
+before treating any number here as a limit rather than a starting point.
+List prices used below: Opus 5 at $5/$25 per MTok, Sonnet 5 at $3/$15 —
+re-check these, and note a discounted account pays less than the list figure.
+
+### Why Budgeting Matters
 
 - Autonomous agentic loops can burn hundreds of thousands of tokens silently
 - `xhigh` effort level increases reasoning depth → more tokens
@@ -80,9 +85,9 @@ Launching 3 parallel agents simultaneously:
 
 | Configuration | Cost per Run (approximate) |
 |--------------|---------------------------|
-| 3× code-explorer (sonnet) | 3 × 40k × $3/$15 MTok ≈ $0.45 |
-| 3× code-architect (opus-4-7 xhigh) | 3 × 60k × $5/$25 MTok ≈ $1.35 |
-| 3× code-reviewer (opus-4-7 xhigh) | 3 × 45k × $5/$25 MTok ≈ $1.00 |
+| 3× code-explorer (sonnet-5 high) | 3 × 40k × $3/$15 MTok ≈ $0.45 |
+| 3× code-architect (opus-5 xhigh) | 3 × 60k × $5/$25 MTok ≈ $1.35 |
+| 3× code-reviewer (opus-5 xhigh) | 3 × 45k × $5/$25 MTok ≈ $1.00 |
 
 ### Respecting Budgets in Agent Prompts
 
@@ -98,8 +103,9 @@ no preamble. Reference file:line rather than reproducing code."
 
 ## Prompt Caching Strategy
 
-Opus 4.7 supports prompt caching. Cache stable content to reduce cost on
-repeated workflow runs.
+Cache stable content to reduce cost on repeated workflow runs. Caching is a
+prefix match: any byte that changes invalidates everything after it, so stable
+content has to physically precede volatile content.
 
 ### What to Cache
 
@@ -156,15 +162,16 @@ Across a 10-iteration workflow: ~$1.80 saved on input alone.
 
 ## Task Budget Enforcement
 
-Opus 4.7 supports `task_budget` — a cap on total tokens for an entire
-agentic loop. The model pauses and asks for confirmation at the limit.
+`task_budget` caps total tokens for an entire agentic loop. Unlike `max_tokens`,
+the model is aware of it and paces itself toward a graceful finish rather than
+being cut off mid-thought.
 
 ### Setting Task Budgets
 
 ```python
 # Via API
 response = client.messages.create(
-    model='claude-opus-4-7',
+    model='claude-opus-5',
     task_budget={'max_tokens': 1_000_000},
     messages=[...]
 )
@@ -292,8 +299,8 @@ Use sonnet for initial exploration (breadth), then opus for deep dives
 on specific findings (depth):
 
 ```
-1. code-explorer (sonnet): Survey the codebase, identify 20 candidate files
-2. code-reviewer (opus-4-7): Deep review of the 3 most critical files
+1. code-explorer (sonnet-5): Survey the codebase, identify 20 candidate files
+2. code-reviewer (opus-5): Deep review of the 3 most critical files
 ```
 
 ### Pattern 6: Batch Reviews Across Files

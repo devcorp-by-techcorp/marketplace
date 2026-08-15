@@ -18,6 +18,8 @@ Usage:
 Returns: JSON report with issues, score, and recommendations
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re

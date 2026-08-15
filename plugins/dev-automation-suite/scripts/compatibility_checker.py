@@ -7,6 +7,8 @@ Usage: python compatibility_checker.py <target_file> <project_root>
 Returns: JSON report with compatibility score and issues
 """
 
+from __future__ import annotations
+
 import ast
 import json
 import sys

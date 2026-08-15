@@ -4,6 +4,190 @@ All notable changes to the dev-automation-suite.
 
 Format follows Keep a Changelog. Versioning is semantic.
 
+## [3.3.2] — 2026-08-15
+
+Three defects in the independent-review machinery, found by automated review on
+the pull request. All three were real; all three are now pinned by a test that
+fails without the fix.
+
+### Fixed
+
+- **A task containing Markdown headings failed to build.** The task was written
+  into the packet unfenced, so a bug report opening with `## Steps to reproduce`
+  read as an extra packet section — and a task containing its own `## Work`
+  truncated the section split. The build failed closed on a request that had
+  been recorded exactly right, and blamed the *work* for it in the error
+  message. Both sections are now fenced, with a fence longer than any backtick
+  run inside them, since tasks arrive from issue trackers with code blocks in
+  them and diffs touch Markdown files.
+
+- **`work_sha256` was written into every packet and never checked.** A packet
+  whose diff was edited after the build still read `CLEAN`. Declaring a hash and
+  not enforcing it is worse than declaring none. The realistic failure here is
+  staleness rather than tampering — a packet built early, work continued, packet
+  never rebuilt — and the reviewer then passes an artifact that no longer
+  exists. Now surfaced as `work_tampering`.
+
+- **`Grep(glob: ".dev-suite/**")` bypassed the reviewer isolation hook.** The
+  hook checked a fixed list of key names, and `glob` was not on it — so the
+  reviewer could search session state while direct `Read` and `Bash` access
+  were blocked. Location inputs are now resolved per tool, which also fixes the
+  mirror-image error: `Grep`'s `pattern` is a regex, not a path, and matching
+  it blocked a reviewer from grepping the source for the literal string
+  `.dev-suite`. Unrecognised tools are checked against every key that has ever
+  meant a location, so one added later fails closed.
+
+### Tests
+
+122 → 130.
+
+## [3.3.1] — 2026-08-15
+
+### Fixed
+
+- **The advertised Python floor was not real.** Five scripts annotate with
+  `list[...]` without `from __future__ import annotations`. Annotations are
+  evaluated at definition time, so those modules raise `TypeError` on Python
+  3.8 — the version `SKILL.md` and `plugin.json` both advertise. Nothing here
+  would have noticed until a user on an old interpreter hit it, because every
+  development machine runs something newer. Added the future import rather than
+  quietly raising the floor: the claim was the contract.
+
+### Added
+
+- A regression test that walks each script's AST and fails any PEP 585
+  (`list[str]`) or PEP 604 (`X | Y`) annotation in a module without postponed
+  annotations, naming the file, line, and which PEP puts the floor where.
+  A second test asserts the advertised floor appears in the CI matrix — a
+  README that says 3.8 and a matrix starting at 3.11 is a claim nobody tests.
+- Repository CI (`.github/workflows/ci.yml`): the suite's tests on 3.8/3.11/3.13
+  with nothing installed first, executable bits checked against the git index,
+  marketplace `source` resolution, and workflow-script parsing.
+
+## [3.3.0] — 2026-08-15
+
+Review and validation are now performed by an agent that never sees how the
+work was produced.
+
+### The problem
+
+Delegating review to a separate agent looks like independence — different
+context window, clean start. But the reviewer's prompt is written by an
+orchestrator that has been inside the problem for twenty turns, and that
+orchestrator does not leak the reasoning by being careless. It leaks by being
+helpful: *"review the retry logic I added around the timeout — I used
+exponential backoff because the fixed delay was hammering the upstream, tests
+pass."* Every clause is true and disqualifying. The reviewer will check whether
+backoff was implemented correctly. It will not ask whether retrying was the
+right response at all — the question the framing quietly closed.
+
+Telling the reviewer to be objective does not touch this. The information is
+already in its context window.
+
+### Added
+
+- **`scripts/review_packet.py`** — `record` pins the original task before work
+  starts, `build` assembles a packet from that pinned task plus a diff, `check`
+  verifies any packet carries nothing else. `check` is separate from `build`
+  because a hand-assembled packet still has to be checkable; enforcement that
+  only works when you used the right tool is not enforcement.
+
+  Seven named rules: `extra_section`, `missing_section`, `task_tampering`,
+  `author_narrative`, `verification_block`, `self_assessment`,
+  `process_reference`. Prose rules match only outside code fences — a diff
+  legitimately contains `I` in a string literal and `PASS` in a test name, and
+  a checker that flags the artifact for words about the artifact gets switched
+  off within a week.
+
+- **`hooks/reviewer-isolation.sh`** — on `PreToolUse`, denies the reviewer any
+  read into `.dev-suite/`, session logs, agent transcripts, and `.jsonl`, by
+  path and by shell command. A reviewer handed a clean packet that can then
+  open the author's session log has been handed nothing and told everything.
+  The codebase stays fully readable: reviewing a diff means reading the code
+  around it. On `SubagentStart`, injects the blind-review contract, so it does
+  not depend on the orchestrator remembering to include it.
+
+- **`workflows/independent-review.js`** — the structural layer. A workflow
+  holds orchestration in a script, so intermediate results live in script
+  variables rather than a context window: the reviewer prompts are built from
+  `task` and `diff`, and no variable holding the author's account exists for
+  them to be built from. Runs reviewers in parallel without showing them each
+  other's findings, and halts the whole run if any reviewer reports
+  contamination — a framed reviewer does not become independent because two
+  others agreed with it.
+
+- **`references/independent-review.md`** — why the task is pinned by hash, what
+  each of the four layers covers, and which phases this does not apply to.
+
+### Changed
+
+- **Phases 3 and 7 require `--review-packet`** and halt without a clean one.
+  Phases 2 and 5 are agent-led but *produce* work rather than judge it, so they
+  keep the verification-block requirement and take no packet.
+- **`code-reviewer`** carries the blind-review contract, and loses `BashOutput`
+  and `KillShell` — both read another agent's output.
+- The reviewer's own verification block now explicitly covers *its review*, not
+  the author's work. "The author says the tests pass" is not evidence it has.
+
+### Tests
+
+89 → 120. Beyond the rules themselves: that a *self-consistent* paraphrase is
+caught (an orchestrator building its own packet computes a correct hash of its
+own wording, so only the comparison against the recorded original sees it);
+that narrative-shaped code inside the diff is not flagged; that the reviewer
+keeps the codebase and a shell while losing the process record; and that
+Windows separators do not slip past the denylist.
+
+## [3.2.0] — 2026-08-15
+
+Readiness pass for terminal use. The package was structurally sound but did
+not load: the manifests had been moved, the executable bits were never set in
+git, and the hook read a payload shape Claude Code does not send.
+
+### Fixed
+
+- **Plugin manifest relocated back into the plugin.** `plugin.json` had been
+  moved to the repository root, leaving `plugins/dev-automation-suite/` with
+  no manifest and the root looking like a plugin with no components. It now
+  sits at `plugins/dev-automation-suite/.claude-plugin/plugin.json`, where the
+  spec puts it.
+- **Marketplace `source` corrected.** The root manifest pointed at `./`, which
+  resolves to the repository root — an install would have produced a plugin
+  with no agents, commands, skill, or hook. It now points at
+  `./plugins/dev-automation-suite`. Two tests pin the resolution.
+- **Executable bits restored** on `bin/*` and `hooks/*.sh`. They were `100644`
+  in git from the first commit, so a fresh clone could not run the hook
+  (permission denied) or the PATH wrappers.
+- **Hook reads `last_assistant_message`.** That is the field `SubagentStop`
+  actually carries. Reading only the synthetic keys made every payload fall
+  through to the raw JSON, where a verification block's headings are escaped
+  text — so a clean, fully verified delivery was blocked in every real session.
+- **`stop_hook_active` guard added.** A subagent that cannot emit a block was
+  re-blocked up to Claude Code's limit of eight consecutive blocks. It now
+  costs one round.
+
+### Changed
+
+- **`SubagentStop` matcher scoped** from `*` to
+  `^(dev-automation-suite:)?code-(explorer|architect|reviewer)$`. The matcher
+  runs against `agent_type`, so `*` applied this plugin's verification
+  contract to `Explore`, `Plan`, and `general-purpose` — agents that never
+  agreed to it and cannot satisfy it.
+- **Model routing moved to the Claude 5 family**, by task shape rather than by
+  phase number: validation, conductor, and complex work on `claude-opus-5`;
+  discovery and report writing on `claude-sonnet-5` at `high`. Identifiers are
+  pinned rather than aliased — an alias silently re-points on the next release,
+  which changes a quality gate's behaviour without changing a line here.
+- Token-budget pricing table extended to the Claude 5 models, with the
+  estimate-until-measured caveat stated where the figures are used.
+
+### Tests
+
+81 → 89. The new cases pin the real `SubagentStop` payload shape, the
+`stop_hook_active` guard, the matcher's scope in both directions (covers this
+plugin's agents, excludes the built-ins), matcher/`agents/` drift, pinned
+model identifiers, and marketplace `source` resolution.
+
 ## [3.0.0] — 2026-08-11
 
 First release of the merged suite. Consolidates three previously separate

@@ -14,6 +14,7 @@ scripts run.
 
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 import sys
@@ -33,6 +34,7 @@ import stack_profile  # noqa: E402
 import ground_file  # noqa: E402
 import work_items  # noqa: E402
 import verification_gate as gate  # noqa: E402
+import review_packet  # noqa: E402
 
 
 def run_gate(text: str, **kwargs) -> gate.GateReport:
@@ -301,6 +303,41 @@ class TestHook(unittest.TestCase):
         out = self._run('')
         self.assertEqual(out['decision'], 'approve')
 
+    def test_real_subagent_stop_payload_is_read(self):
+        """`last_assistant_message` is the field Claude Code actually sends.
+
+        Reading only the synthetic keys made the hook fall through to the raw
+        JSON, where the block's headings are escaped text and never match — so
+        a perfectly clean delivery was blocked in every real session.
+        """
+        text = (FIXTURES / 'clean-evidence-block.md').read_text()
+        out = self._run(json.dumps({
+            'hook_event_name': 'SubagentStop',
+            'stop_hook_active': False,
+            'agent_type': 'dev-automation-suite:code-reviewer',
+            'last_assistant_message': text,
+        }))
+        self.assertEqual(out['decision'], 'approve')
+
+    def test_real_payload_with_flawed_block_still_blocks(self):
+        text = (FIXTURES / 'flawed-evidence-block.md').read_text()
+        out = self._run(json.dumps({
+            'hook_event_name': 'SubagentStop',
+            'last_assistant_message': text,
+        }))
+        self.assertEqual(out['decision'], 'block')
+
+    def test_stop_hook_active_never_blocks_twice(self):
+        """Claude Code allows 8 consecutive blocks; a subagent that cannot emit
+        a block should cost one round, not eight."""
+        out = self._run(json.dumps({
+            'hook_event_name': 'SubagentStop',
+            'stop_hook_active': True,
+            'agent_type': 'Explore',
+            'last_assistant_message': 'All done, looks good.',
+        }))
+        self.assertEqual(out['decision'], 'approve')
+
     def test_no_aggregate_score_in_hook_output(self):
         text = (FIXTURES / 'flawed-evidence-block.md').read_text()
         out = self._run(json.dumps({'agent': 'a', 'output': text}))
@@ -354,6 +391,45 @@ class TestPluginManifest(unittest.TestCase):
         hooks = json.loads((SUITE_ROOT / 'hooks' / 'hooks.json').read_text())
         command = hooks['hooks']['SubagentStop'][0]['hooks'][0]['command']
         self.assertIn('"${CLAUDE_PLUGIN_ROOT}"', command)
+
+    def test_hook_matcher_scopes_to_this_plugin_s_agents(self):
+        """SubagentStop matches on agent_type, and `*` matches every one of them.
+
+        The gate demands a verification block the built-in agents know nothing
+        about, so an unscoped matcher blocks Explore and general-purpose in
+        every session the plugin is enabled for — the plugin's own contract
+        applied to agents that never agreed to it.
+        """
+        import re
+        hooks = json.loads((SUITE_ROOT / 'hooks' / 'hooks.json').read_text())
+        matcher = hooks['hooks']['SubagentStop'][0]['matcher']
+        self.assertNotEqual(matcher, '*')
+        pattern = re.compile(matcher)
+        for agent in ('code-explorer', 'code-architect', 'code-reviewer'):
+            for name in (agent, f'dev-automation-suite:{agent}'):
+                self.assertTrue(pattern.search(name), name)
+        for outsider in ('Explore', 'Plan', 'general-purpose', 'statusline-setup'):
+            self.assertFalse(pattern.search(outsider), outsider)
+
+    def test_hook_matcher_covers_every_bundled_agent(self):
+        """An agent added to agents/ but not the matcher is silently ungated."""
+        import re
+        hooks = json.loads((SUITE_ROOT / 'hooks' / 'hooks.json').read_text())
+        pattern = re.compile(hooks['hooks']['SubagentStop'][0]['matcher'])
+        for agent in (SUITE_ROOT / 'agents').glob('*.md'):
+            name = re.search(r'(?m)^name:\s*(\S+)', agent.read_text()).group(1)
+            with self.subTest(agent=name):
+                self.assertTrue(pattern.search(f'dev-automation-suite:{name}'), name)
+
+    def test_agent_models_are_pinned_not_aliased(self):
+        """`opus`/`sonnet` re-point on release, changing a gate's behaviour
+        without changing a line of this package."""
+        import re
+        for agent in (SUITE_ROOT / 'agents').glob('*.md'):
+            model = re.search(r'(?m)^model:\s*(\S+)', agent.read_text()).group(1)
+            with self.subTest(agent=agent.name):
+                self.assertNotIn(model, {'opus', 'sonnet', 'haiku'})
+                self.assertRegex(model, r'^claude-[a-z]+-\d')
 
     def test_hook_script_is_executable(self):
         import os
@@ -612,10 +688,26 @@ class TestWorkItems(unittest.TestCase):
         self.assertIn('Derived', index['note'])
 
 
-class TestMarketplaceManifest(unittest.TestCase):
-    """The suite ships its own marketplace so it can be added and installed directly."""
+def _find_marketplace():
+    """Locate the catalog that lists this plugin.
 
-    MARKETPLACE = SUITE_ROOT / '.claude-plugin' / 'marketplace.json'
+    The marketplace manifest belongs at the root of the repository that hosts
+    the plugin, not inside the plugin — `source` paths in it are resolved
+    relative to its own directory, so a manifest sitting beside the plugin's
+    own files can only ever describe the plugin as `./`. Walk up to find it so
+    the suite still tests correctly when vendored under a different root.
+    """
+    for candidate in [SUITE_ROOT, *SUITE_ROOT.parents]:
+        manifest = candidate / '.claude-plugin' / 'marketplace.json'
+        if manifest.is_file():
+            return manifest
+    return None
+
+
+class TestMarketplaceManifest(unittest.TestCase):
+    """The hosting repository's catalog must point at this plugin correctly."""
+
+    MARKETPLACE = _find_marketplace()
 
     #: Names reserved for official Anthropic use. A third-party marketplace using
     #: one fails to load as registered from an untrusted source.
@@ -631,7 +723,11 @@ class TestMarketplaceManifest(unittest.TestCase):
     DESKTOP_REJECTED = {'org', 'org-provisioned', 'unknown'}
 
     def setUp(self):
+        if self.MARKETPLACE is None:
+            self.skipTest('no marketplace.json in any ancestor directory')
         self.mk = json.loads(self.MARKETPLACE.read_text())
+        self.root = self.MARKETPLACE.parent.parent
+        self.entry = next(e for e in self.mk['plugins'] if e['name'] == 'dev-automation-suite')
 
     def test_required_fields_present(self):
         for key in ('name', 'owner', 'plugins'):
@@ -659,14 +755,13 @@ class TestMarketplaceManifest(unittest.TestCase):
     def test_entry_name_matches_plugin_manifest(self):
         """A mismatch installs the plugin under a slug its own manifest disowns."""
         manifest = json.loads((SUITE_ROOT / '.claude-plugin' / 'plugin.json').read_text())
-        self.assertEqual(self.mk['plugins'][0]['name'], manifest['name'])
+        self.assertEqual(self.entry['name'], manifest['name'])
 
     def test_version_declared_in_exactly_one_place(self):
         """plugin.json silently wins, so a version in both lets a stale one mask the other."""
         manifest = json.loads((SUITE_ROOT / '.claude-plugin' / 'plugin.json').read_text())
-        entry = self.mk['plugins'][0]
         self.assertIn('version', manifest)
-        self.assertNotIn('version', entry)
+        self.assertNotIn('version', self.entry)
 
     def test_relative_sources_resolve_and_avoid_traversal(self):
         for entry in self.mk['plugins']:
@@ -674,8 +769,21 @@ class TestMarketplaceManifest(unittest.TestCase):
             if isinstance(source, str):
                 self.assertTrue(source.startswith('./'), source)
                 self.assertNotIn('..', source)
-                resolved = (SUITE_ROOT / source).resolve()
+                resolved = (self.root / source).resolve()
                 self.assertTrue(resolved.is_dir(), resolved)
+
+    def test_entry_source_points_at_this_plugin(self):
+        """A source resolving anywhere else installs an empty plugin, silently.
+
+        `./` — the plugin's own directory when the manifest sat beside it —
+        resolves to the repository root once the manifest moves there, and the
+        root holds no agents/, commands/ or SKILL.md to load.
+        """
+        self.assertEqual((self.root / self.entry['source']).resolve(), SUITE_ROOT)
+
+    def test_entry_source_holds_a_plugin_manifest(self):
+        manifest = (self.root / self.entry['source']).resolve() / '.claude-plugin' / 'plugin.json'
+        self.assertTrue(manifest.is_file(), manifest)
 
     def test_renames_entries_terminate(self):
         """Every chain must end at null or a listed plugin, with no cycles."""
@@ -688,6 +796,389 @@ class TestMarketplaceManifest(unittest.TestCase):
                 seen.add(current)
                 self.assertIn(current, renames, f'{current} terminates nowhere')
                 current = renames[current]
+
+
+class TestReviewPacket(unittest.TestCase):
+    """A reviewer that reads the author's account is not reviewing."""
+
+    TASK = 'Uploads are timing out for some users.'
+    DIFF = ('--- a/upload.py\n+++ b/upload.py\n@@\n'
+            '+MAX_RETRIES = 3\n+def upload(f): ...\n')
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.record = review_packet.record_task(str(self.root), self.TASK)
+
+    def _packet(self, **overrides):
+        return review_packet.build_packet(
+            overrides.get('record', self.record), overrides.get('work', self.DIFF))
+
+    # -- the clean path ----------------------------------------------------
+
+    def test_built_packet_is_clean(self):
+        self.assertEqual(review_packet.check_packet(self._packet(), self.record), [])
+
+    def test_packet_contains_task_and_work_only(self):
+        headings = [h for _, h in review_packet.headings(self._packet().splitlines())]
+        self.assertEqual(headings, ['## Task', '## Work'])
+
+    # -- the task is quoted, not restated ----------------------------------
+
+    def test_restated_task_is_caught(self):
+        """The framing failure this module exists for: an orchestrator that
+        compresses the request into an already-decided sentence."""
+        leading = self._packet().replace(
+            self.TASK, 'Review the retry logic added to fix the upload race.')
+        rules = {f.rule for f in review_packet.check_packet(leading, self.record)}
+        self.assertIn('task_tampering', rules)
+
+    def test_self_consistent_paraphrase_is_still_caught(self):
+        """The realistic attack, and the one the header alone misses.
+
+        An orchestrator that builds its own packet computes a correct hash of
+        its own paraphrase, so the packet is internally consistent. Only the
+        comparison against the task recorded before work began catches it.
+        """
+        forged = dict(self.record)
+        forged['task'] = 'Review the retry logic added to fix the upload race.'
+        forged['sha256'] = review_packet.sha256(forged['task'])
+        packet = review_packet.build_packet(forged, self.DIFF)
+
+        self.assertEqual(review_packet.check_packet(packet), [],
+                         'internally consistent — the header check cannot see this')
+        rules = {f.rule for f in review_packet.check_packet(packet, self.record)}
+        self.assertIn('task_tampering', rules)
+
+    def test_task_edit_is_caught_without_the_recorded_original(self):
+        """A packet from elsewhere is still checkable: the header pins the hash."""
+        edited = self._packet().replace(self.TASK, 'Fix the upload race condition.')
+        rules = {f.rule for f in review_packet.check_packet(edited)}
+        self.assertIn('task_tampering', rules)
+
+    def test_recording_a_different_task_is_refused(self):
+        """A task re-recorded mid-work is the author's summary of what they built."""
+        with self.assertRaises(ValueError):
+            review_packet.record_task(str(self.root), 'Add retry logic to uploads.')
+
+    def test_recording_the_same_task_is_idempotent(self):
+        again = review_packet.record_task(str(self.root), self.TASK)
+        self.assertEqual(again['sha256'], self.record['sha256'])
+
+    # -- prose contamination ----------------------------------------------
+
+    def test_author_narrative_is_caught(self):
+        packet = self._packet() + '\nI chose exponential backoff for this.\n'
+        rules = {f.rule for f in review_packet.check_packet(packet, self.record)}
+        self.assertIn('author_narrative', rules)
+
+    def test_self_assessment_is_caught(self):
+        packet = self._packet() + '\nAll tests pass, ready for merge.\n'
+        rules = {f.rule for f in review_packet.check_packet(packet, self.record)}
+        self.assertIn('self_assessment', rules)
+
+    def test_authors_verification_block_is_caught(self):
+        packet = self._packet() + '\n## Pre-Output Verification\n\nchecked\n'
+        rules = {f.rule for f in review_packet.check_packet(packet, self.record)}
+        self.assertIn('verification_block', rules)
+
+    def test_process_reference_is_caught(self):
+        packet = self._packet() + '\nSee .dev-suite/logs/session.log for context.\n'
+        rules = {f.rule for f in review_packet.check_packet(packet, self.record)}
+        self.assertIn('process_reference', rules)
+
+    def test_extra_section_is_caught(self):
+        packet = self._packet() + '\n## Notes for the reviewer\n\ncontext\n'
+        rules = {f.rule for f in review_packet.check_packet(packet, self.record)}
+        self.assertIn('extra_section', rules)
+
+    # -- the checker must not eat correct packets --------------------------
+
+    def test_markdown_headings_in_the_task_do_not_break_the_packet(self):
+        """A bug report opening with `## Steps to reproduce` is an ordinary
+        task. Unfenced, its headings read as packet structure and the build
+        fails closed on a request that was recorded exactly right."""
+        task = ('Uploads time out.\n\n## Steps to reproduce\n\n'
+                '1. Upload a 2GB file\n\n## Work already tried\n\nRaising the timeout.')
+        root = Path(tempfile.mkdtemp())
+        record = review_packet.record_task(str(root), task)
+        packet = review_packet.build_packet(record, self.DIFF)
+        self.assertEqual(review_packet.check_packet(packet, record), [])
+
+    def test_a_task_containing_its_own_fence_is_wrapped_in_a_longer_one(self):
+        """Tasks get pasted out of issue trackers, code blocks and all. A fixed
+        three-backtick wrapper is closed by the first one of those."""
+        task = 'Uploads time out.\n\n```python\nupload(big)\n```'
+        root = Path(tempfile.mkdtemp())
+        record = review_packet.record_task(str(root), task)
+        packet = review_packet.build_packet(record, self.DIFF)
+        self.assertIn('````text', packet)
+        self.assertEqual(review_packet.check_packet(packet, record), [])
+
+    def test_a_diff_touching_markdown_does_not_break_the_packet(self):
+        work = ('--- a/README.md\n+++ b/README.md\n@@\n'
+                '+## Install\n+\n+```bash\n+pip install x\n+```\n')
+        packet = review_packet.build_packet(self.record, work)
+        self.assertEqual(review_packet.check_packet(packet, self.record), [])
+
+    def test_swapped_work_is_caught(self):
+        """Declaring a hash and never checking it reads as integrity that is
+        not enforced. The realistic case is staleness, not tampering: a packet
+        built early, work continued, packet never rebuilt."""
+        packet = self._packet().replace('+MAX_RETRIES = 3', '+MAX_RETRIES = 999')
+        rules = {f.rule for f in review_packet.check_packet(packet, self.record)}
+        self.assertIn('work_tampering', rules)
+
+    def test_narrative_shaped_code_is_not_flagged(self):
+        """The diff is the artifact. Scanning it for words *about* the artifact
+        is how a checker like this starts rejecting correct packets."""
+        noisy = ('--- a/x.py\n+++ b/x.py\n@@\n'
+                 '+# I decided on a token bucket; all tests pass.\n'
+                 '+STATUS = "OBSERVED"\n'
+                 '+def my_approach(): ...\n')
+        packet = review_packet.build_packet(self.record, noisy)
+        self.assertEqual(review_packet.check_packet(packet, self.record), [])
+
+    def test_build_refuses_work_carrying_narrative_outside_the_fence(self):
+        with self.assertRaises(ValueError):
+            review_packet.build_packet(self.record, '   ')
+
+    def test_missing_section_is_caught(self):
+        rules = {f.rule for f in review_packet.check_packet('## Task\n\nsomething\n')}
+        self.assertIn('missing_section', rules)
+
+    def test_no_recorded_task_is_an_explicit_failure(self):
+        with self.assertRaises(FileNotFoundError):
+            review_packet.load_task(str(Path(tempfile.mkdtemp())))
+
+
+class TestReviewerIsolation(unittest.TestCase):
+    """The packet controls what the reviewer is handed; this controls what it
+    can reach. A reviewer given a clean packet that can open the author's
+    session log has been handed nothing and told everything."""
+
+    HOOK = HOOKS / 'reviewer-isolation.sh'
+
+    def _run(self, payload: dict) -> dict:
+        result = subprocess.run(
+            ['bash', str(self.HOOK)], input=json.dumps(payload),
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout) if result.stdout.strip() else {}
+
+    def _decision(self, payload: dict) -> str:
+        out = self._run(payload)
+        return out.get('hookSpecificOutput', {}).get('permissionDecision', 'allow')
+
+    def _pre(self, tool: str, tool_input: dict, agent='dev-automation-suite:code-reviewer'):
+        return {'hook_event_name': 'PreToolUse', 'agent_type': agent,
+                'tool_name': tool, 'tool_input': tool_input}
+
+    def test_reviewer_cannot_read_suite_state(self):
+        self.assertEqual(
+            self._decision(self._pre('Read', {'file_path': '/p/.dev-suite/logs/a.log'})),
+            'deny')
+
+    def test_reviewer_cannot_read_an_agent_transcript(self):
+        self.assertEqual(
+            self._decision(self._pre(
+                'Read', {'file_path': '/home/u/.claude/projects/x/subagents/a.jsonl'})),
+            'deny')
+
+    def test_reviewer_cannot_shell_into_the_process_record(self):
+        self.assertEqual(
+            self._decision(self._pre('Bash', {'command': 'cat .dev-suite/logs/*.log'})),
+            'deny')
+
+    def test_reviewer_keeps_the_codebase(self):
+        """Reviewing a diff means reading the code around it."""
+        self.assertEqual(
+            self._decision(self._pre('Read', {'file_path': '/p/src/upload.py'})),
+            'allow')
+
+    def test_reviewer_keeps_a_shell_for_tests(self):
+        self.assertEqual(
+            self._decision(self._pre('Bash', {'command': 'python3 -m pytest tests/'})),
+            'allow')
+
+    def test_windows_separators_do_not_bypass_the_denylist(self):
+        """A forward-slash rule never matches a backslash path, and the call
+        proceeds as though the hook had not run."""
+        self.assertEqual(
+            self._decision(self._pre(
+                'Read', {'file_path': 'C:\\proj\\.dev-suite\\logs\\a.log'})),
+            'deny')
+
+    def test_grep_glob_cannot_reach_the_process_record(self):
+        """`glob` is a location and `path` is a location, but Grep's `pattern`
+        is a regex. A key-name denylist that ignores the difference lets
+        `Grep(glob=".dev-suite/**")` read the session while Read and Bash are
+        blocked."""
+        self.assertEqual(
+            self._decision(self._pre(
+                'Grep', {'pattern': 'secret', 'glob': '.dev-suite/**'})),
+            'deny')
+
+    def test_grepping_for_the_string_is_still_allowed(self):
+        """The mirror-image error: blocking a reviewer from searching the source
+        for the literal text, which is ordinary review of this very plugin."""
+        self.assertEqual(
+            self._decision(self._pre(
+                'Grep', {'pattern': r'\.dev-suite', 'path': 'scripts'})),
+            'allow')
+
+    def test_glob_pattern_is_a_location(self):
+        self.assertEqual(
+            self._decision(self._pre('Glob', {'pattern': '.dev-suite/**/*.json'})),
+            'deny')
+
+    def test_an_unrecognised_tool_fails_closed(self):
+        """A file-reading tool added later must not pass silently."""
+        self.assertEqual(
+            self._decision(self._pre('SomeNewReader', {'glob': '.dev-suite/**'})),
+            'deny')
+
+    def test_other_agents_are_untouched(self):
+        self.assertEqual(
+            self._decision(self._pre(
+                'Read', {'file_path': '/p/.dev-suite/logs/a.log'}, agent='Explore')),
+            'allow')
+
+    def test_contract_is_injected_at_spawn(self):
+        """So the contract does not depend on the orchestrator including it."""
+        out = self._run({'hook_event_name': 'SubagentStart',
+                         'agent_type': 'dev-automation-suite:code-reviewer',
+                         'agent_id': 'a1'})
+        context = out['hookSpecificOutput']['additionalContext']
+        self.assertIn('independently', context)
+        self.assertIn('report the contamination', context)
+
+    def test_malformed_payload_does_not_wedge_the_session(self):
+        result = subprocess.run(
+            ['bash', str(self.HOOK)], input='not json',
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0)
+
+
+class TestBlindReviewWiring(unittest.TestCase):
+    """The two phases where one agent judges another's output."""
+
+    def setUp(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import suite_orchestrator
+        self.orch = suite_orchestrator
+
+    def test_review_and_validate_require_a_packet(self):
+        for phase in (3, 7):
+            with self.subTest(phase=phase):
+                self.assertTrue(self.orch.PHASES[phase].requires_review_packet)
+
+    def test_producing_phases_do_not(self):
+        """Build and Fix are agent-led but not reviewing — the agent is
+        producing work, not judging someone else's."""
+        for phase in (2, 5):
+            with self.subTest(phase=phase):
+                self.assertFalse(self.orch.PHASES[phase].requires_review_packet)
+
+    def test_missing_packet_halts_the_phase(self):
+        result = self.orch.run_phase(3, project_root=tempfile.mkdtemp())
+        packet_checks = [c for c in result.checks if c.script == 'review_packet']
+        self.assertEqual(len(packet_checks), 1)
+        self.assertEqual(packet_checks[0].verdict, 'HALT')
+
+    def test_contaminated_packet_halts_rather_than_routing_to_fix(self):
+        """There is nothing to fix in the code — the review was never conducted
+        under the conditions it claims."""
+        spec = registry.get('review_packet')
+        self.assertTrue(spec.halts_on_fail)
+        self.assertEqual(spec.interpret_exit(1), 'HALT')
+
+    def test_reviewer_has_no_tool_that_reads_another_agent_s_output(self):
+        import re
+        text = (SUITE_ROOT / 'agents' / 'code-reviewer.md').read_text()
+        tools = re.search(r'(?m)^tools:\s*(.+)$', text).group(1)
+        for forbidden in ('BashOutput', 'KillShell'):
+            self.assertNotIn(forbidden, tools)
+
+    def test_workflow_ships_and_declares_its_name(self):
+        workflow = SUITE_ROOT / 'workflows' / 'independent-review.js'
+        self.assertTrue(workflow.is_file())
+        source = workflow.read_text()
+        self.assertIn("name: 'independent-review'", source)
+        self.assertNotIn('import(', source,
+                         'the workflow runtime rejects a script containing import()')
+
+
+class TestPythonFloorIsReal(unittest.TestCase):
+    """The package advertises Python 3.8+. That claim is only worth making if
+    something checks it — annotations are evaluated at definition time, so
+    `def f() -> list[str]` raises TypeError on 3.8 and nothing here would
+    notice until a user on an old interpreter hit it.
+    """
+
+    #: PEP 585 builtin generics: `list[str]` is a runtime subscript of the
+    #: builtin, valid from 3.9. Under `from __future__ import annotations`
+    #: every annotation is a string and never evaluated, so 3.8 is fine.
+    PEP_585 = {'list', 'dict', 'tuple', 'set', 'frozenset', 'type'}
+
+    def _annotations(self, tree):
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                arg_list = list(node.args.args) + list(node.args.kwonlyargs)
+                arg_list += list(getattr(node.args, 'posonlyargs', []))
+                for arg in arg_list:
+                    if arg.annotation is not None:
+                        yield arg.annotation
+                if node.returns is not None:
+                    yield node.returns
+            elif isinstance(node, ast.AnnAssign) and node.annotation is not None:
+                yield node.annotation
+
+    def _offending(self, annotation):
+        """Constructs that are evaluated at definition time and fail on 3.8."""
+        for node in ast.walk(annotation):
+            if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+                if node.value.id in self.PEP_585:
+                    return f'{node.value.id}[...] (PEP 585, needs 3.9)'
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+                return 'X | Y union (PEP 604, needs 3.10)'
+        return None
+
+    def test_modern_annotations_are_postponed(self):
+        for path in sorted((SUITE_ROOT / 'scripts').glob('*.py')):
+            source = path.read_text()
+            tree = ast.parse(source)
+            postponed = any(
+                isinstance(n, ast.ImportFrom) and n.module == '__future__'
+                and any(a.name == 'annotations' for a in n.names)
+                for n in tree.body
+            )
+            if postponed:
+                continue
+            with self.subTest(script=path.name):
+                for annotation in self._annotations(tree):
+                    offence = self._offending(annotation)
+                    self.assertIsNone(
+                        offence,
+                        f'{path.name}:{annotation.lineno} uses {offence} without '
+                        "`from __future__ import annotations`. It is evaluated at "
+                        'definition time and raises TypeError on the advertised '
+                        'floor. Add the future import, or change the floor.',
+                    )
+
+    def test_advertised_floor_matches_the_ci_matrix(self):
+        """A README that says 3.8 and a matrix that starts at 3.11 is a claim
+        nobody tests."""
+        import re
+        workflow = (SUITE_ROOT.parent.parent / '.github' / 'workflows' / 'ci.yml')
+        if not workflow.is_file():
+            self.skipTest('no CI workflow in this checkout')
+        text = workflow.read_text()
+        advertised = re.search(
+            r'Python (\d+\.\d+)\+', (SUITE_ROOT / 'SKILL.md').read_text())
+        self.assertIsNotNone(advertised, 'SKILL.md states no Python floor')
+        self.assertIn(f"'{advertised.group(1)}'", text,
+                      'the advertised floor is not in the CI matrix')
 
 
 if __name__ == '__main__':

@@ -2,7 +2,7 @@
 name: code-architect
 description: Designs feature architectures by analyzing existing codebase patterns and conventions, then providing comprehensive implementation blueprints with specific files to create/modify, component designs, data flows, and build sequences
 tools: Glob, Grep, LS, Read, NotebookRead, WebFetch, TodoWrite, WebSearch, KillShell, BashOutput
-model: claude-opus-4-7
+model: claude-opus-5
 effort: xhigh
 color: green
 ---

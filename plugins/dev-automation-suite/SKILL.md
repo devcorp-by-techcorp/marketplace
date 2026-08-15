@@ -3,7 +3,7 @@ name: dev-automation-suite
 description: "Complete autonomous development system covering the full lifecycle: analyse, build, review, test, fix, simplify, validate, harden, observe, ship. Orchestrates specialised subagents through eleven phases with script-enforced quality gates, evidence-driven agent output verification, stack-aware check profiles, and iterative self-correction loops. Rejects band-aid fixes, halts on breaking changes, and blocks unverified agent deliveries at the SubagentStop hook. Use whenever building features, fixing bugs, refactoring, hardening, or shipping — any multi-step development work needing autonomous production with enforced quality. Triggers on: 'build', 'implement', 'develop', 'create feature', 'fix bug', 'refactor', 'harden', 'ship', 'release', 'automate', 'iterate until done', 'development workflow', 'quality gate', 'verify output', 'build and test'."
 license: Apache-2.0
 metadata:
-  version: 3.1.1
+  version: 3.3.2
   lineages: automate-dev, production-code-quality, agent-output-verification
 ---
 
@@ -113,9 +113,9 @@ pass, by design.
 
 | Agent | Role | Model | Effort | Phases |
 |-------|------|-------|--------|--------|
-| **code-explorer** | Codebase tracing, pattern discovery | `sonnet` | high | 1 |
-| **code-architect** | Architecture design, implementation blueprints | `claude-opus-4-7` | xhigh | 2 |
-| **code-reviewer** | Quality review — simplicity, correctness, conventions | `claude-opus-4-7` | xhigh | 3, 7 |
+| **code-explorer** | Codebase tracing, pattern discovery | `claude-sonnet-5` | high | 1 |
+| **code-architect** | Architecture design, implementation blueprints | `claude-opus-5` | xhigh | 2 |
+| **code-reviewer** | Quality review — simplicity, correctness, conventions | `claude-opus-5` | xhigh | 3, 7 |
 
 All three carry an `## Exit Criteria — Pre-Output Verification` section. That
 section is the contract the `SubagentStop` hook enforces; it is not optional
@@ -126,7 +126,7 @@ Agents provide **judgment**. Scripts provide **rule enforcement**. Use both.
 
 ## Script registry
 
-Sixteen scripts, one declared contract each. Query it directly:
+Seventeen scripts, one declared contract each. Query it directly:
 
 ```bash
 python3 scripts/script_registry.py          # full wiring report
@@ -140,6 +140,7 @@ python3 scripts/script_registry.py          # full wiring report
 | `stack_profile.py` | Stack detection → check profile | 0,1 |
 | `ground_file.py` | Premise tracking; halts on OPEN high-impact premises | 0,1,7 |
 | `work_items.py` | Local epic/ticket tracking, dependency waves | 1,10 |
+| `review_packet.py` | Builds/verifies the blind-review packet | 3,7 |
 | `dev_orchestrator.py` | Phase engine (analyse/test/validate) | 1,4,7 |
 | `code_reviewer.py` | Band-aid, security, breaking-change review | 3,7 |
 | `code_simplifier.py` | Nesting, duplication, naming | 6 |
@@ -153,8 +154,10 @@ python3 scripts/script_registry.py          # full wiring report
 | `rn_analyzer.py` | React Native / Expo analysis | 3 |
 | `self_assessment.py` | Consolidated quality self-assessment | 7 |
 
-`breaking_change_detector` and `verification_gate` **halt** rather than fail:
-their failures require explicit resolution and are never auto-routed to Fix.
+`breaking_change_detector`, `verification_gate`, and `review_packet` **halt**
+rather than fail: their failures require explicit resolution and are never
+auto-routed to Fix. For `review_packet` there is nothing in the code to fix —
+the review was never conducted under the conditions it claims.
 
 ## The verification gate
 
@@ -169,8 +172,52 @@ a prose checklist cannot enforce on itself:
 - **Aggregate score** present → the block is invalid
 - **Literal secrets** → redacted to location and type before reporting
 
-Wired at `SubagentStop` via `hooks/hooks.json`. Read
-`references/output-verification.md` for the full evidence model.
+Wired at `SubagentStop` via `hooks/hooks.json`, scoped by `matcher` to this
+plugin's own three agents. The gate demands a verification block, and the
+built-in agents — `Explore`, `Plan`, `general-purpose` — have never heard of
+one: an unscoped matcher would block every subagent in every session the
+plugin is enabled for. Widen the matcher to `*` only after the agents you are
+widening it over actually emit blocks.
+
+Read `references/output-verification.md` for the full evidence model and
+`references/hooks.md` for the payload contract.
+
+## Independent review
+
+Phases 3 and 7 are where one agent judges another's output, and a reviewer that
+has read the author's account is not judging — it is agreeing with an argument.
+The leak is rarely deliberate. An orchestrator twenty turns into the problem
+writes "review the retry logic I added around the timeout", and the reviewer
+now checks whether backoff was implemented correctly rather than whether
+retrying was the right response at all.
+
+So a reviewing agent receives exactly two things: the **original task**,
+verbatim and pinned by hash before work began, and the **completed work** as a
+diff. Withheld: the reasoning, the steps, the author's own verification block,
+and the author's assessment of the result.
+
+```bash
+python3 scripts/review_packet.py record <root> --task-file request.txt
+python3 scripts/review_packet.py build  <root> --diff work.diff -o packet.md
+python3 scripts/suite_orchestrator.py run review <root> \
+    --review-packet packet.md --verification-block block.md --commit
+```
+
+Four layers, because no one of them is sufficient:
+
+| Layer | Mechanism |
+|---|---|
+| Structural | `workflows/independent-review.js` — results live in script variables, so there is no author's account for a reviewer prompt to be built from |
+| Mechanical | `review_packet.py check` — eight named rules; prose rules matched outside code fences, both section hashes verified |
+| Tool boundary | `hooks/reviewer-isolation.sh` on `PreToolUse` — reads into `.dev-suite/`, logs, and transcripts are denied |
+| Contractual | the same hook on `SubagentStart` — injects the blind-review contract so it does not depend on the caller |
+
+Pinning the task is the least obvious rule and does the most work: an
+orchestrator asked to restate the request compresses its own conclusions into
+it. See `references/independent-review.md`.
+
+Phases 2 and 5 are agent-led but *produce* work rather than judge it — they
+need a verification block and no packet.
 
 ## Premise tracking
 
@@ -210,17 +257,22 @@ See `references/stack-profiles.md` to add a profile.
 
 ## Model routing
 
+Routing follows one rule: **validation, conductor, and complex work → Opus 5;
+report writing and discovery work → Sonnet 5 at `high`.**
+
 | Difficulty | Model | Effort | Examples |
 |-----------|-------|--------|----------|
-| low | sonnet | default | Simple reads, formatting |
-| medium | sonnet | high | Multi-file tracing, routine refactors |
-| **high** | **claude-opus-4-7** | **xhigh** | Review, architecture, quality gates |
-| xhigh | **claude-opus-4-7** | **xhigh** | Complex refactoring, subtle debugging |
-| max | **claude-opus-4-7** | **max** | Formal verification, security audits |
+| low | `claude-sonnet-5` | default | Simple reads, formatting |
+| medium | `claude-sonnet-5` | high | Discovery, tracing, report writing |
+| **high** | **`claude-opus-5`** | **xhigh** | Review, architecture, quality gates |
+| xhigh | **`claude-opus-5`** | **xhigh** | Complex refactoring, subtle debugging |
+| max | **`claude-opus-5`** | **max** | Formal verification, security audits |
 
-Opus 4.7 is required for any agent reviewing another agent's work, all
-architectural decisions, and Phase 7 validation. See
-`references/model-deployment.md`.
+Opus 5 is required for any agent reviewing another agent's work, all
+architectural decisions, and Phase 7 validation — that is validation work,
+and validation is the one place a cheaper model costs more than it saves.
+Identifiers are pinned rather than aliased, so a model retirement fails
+loudly instead of drifting. See `references/model-deployment.md`.
 
 ## Reference documentation
 
@@ -235,6 +287,7 @@ Loaded on demand to preserve context budget.
 | `references/stack-profiles.md` | Adding or amending a stack profile |
 | `references/assumption-tracking.md` | Premise types, tiers, gate cross-check |
 | `references/project-lifecycle.md` | The outer intake→retrospective loop |
+| `references/independent-review.md` | Blind review: the packet, the four layers |
 | `references/hooks.md` | Hook wiring and payload contract |
 | `references/iteration-protocols.md` | Loop management, stall detection |
 | `references/code-simplification.md` | Simplification rules |
@@ -245,11 +298,12 @@ Loaded on demand to preserve context budget.
 ## Testing
 
 ```bash
-python3 tests/test_suite.py     # 81 regression tests, standard library only
+python3 tests/test_suite.py     # 130 regression tests, standard library only
 ```
 
 Covers the gate rules, premise cross-check, registry integrity, stack
-detection, work-item ordering, and hook payload handling. Run before packaging any change.
+detection, work-item ordering, hook payload handling, and the blind-review
+packet and isolation hook. Run before packaging any change.
 
 ## Installation
 
@@ -258,28 +312,37 @@ detection, work-item ordering, and hook payload handling. Run before packaging a
 The package is a complete plugin: manifest at `.claude-plugin/plugin.json`,
 agents, slash commands, the `SubagentStop` hook, and `bin/` wrappers.
 
-The suite ships its own marketplace (`techcorp-plugins`), so no separate
-catalog repository is needed:
+It is distributed through the `techcorp-plugins` marketplace, whose manifest
+sits at the root of the hosting repository and points at this plugin's
+directory:
 
 ```bash
-claude plugin marketplace add /path/to/dev-automation-suite
+claude plugin marketplace add devcorp-by-techcorp/marketplace
 claude plugin install dev-automation-suite@techcorp-plugins
+```
+
+From a local checkout, add the **repository root** — not the plugin directory.
+`source` paths resolve relative to the manifest, so pointing at the plugin
+directory finds no marketplace at all:
+
+```bash
+claude plugin marketplace add /path/to/marketplace
 ```
 
 Or without installing at all:
 
 ```bash
 # Try it for one session
-claude --plugin-dir /path/to/dev-automation-suite
+claude --plugin-dir /path/to/marketplace/plugins/dev-automation-suite
 
 # Or scaffold it as a skills-directory plugin, loaded on next session
-cp -r dev-automation-suite ~/.claude/skills/
+cp -r plugins/dev-automation-suite ~/.claude/skills/
 ```
 
 Verify before relying on it:
 
 ```bash
-claude plugin validate /path/to/dev-automation-suite
+claude plugin validate /path/to/marketplace/plugins/dev-automation-suite
 claude plugin details dev-automation-suite
 ```
 
@@ -290,7 +353,8 @@ What the plugin contributes once enabled:
 | Skill | `/dev-automation-suite` |
 | Commands | `:run-phase`, `:verify-output`, `:detect-stack`, `:common-ground`, `:work-items`, `:feature-development` |
 | Agents | `dev-automation-suite:code-explorer`, `:code-architect`, `:code-reviewer` in the `@`-mention typeahead |
-| Hook | `SubagentStop` → the verification gate, on every subagent |
+| Hooks | `SubagentStop` → the verification gate, on this plugin's three agents. `PreToolUse` + `SubagentStart` → reviewer isolation |
+| Workflow | `/dev-automation-suite:independent-review` |
 | Executables | `dev-suite`, `dev-suite-verify`, `dev-suite-stack`, `dev-suite-ground`, `dev-suite-work` |
 
 The `bin/` wrappers resolve the suite root from their own location, so they work

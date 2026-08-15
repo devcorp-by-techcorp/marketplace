@@ -1,9 +1,33 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-hooks.json",
   "hooks": {
+    "SubagentStart": [
+      {
+        "matcher": "^(dev-automation-suite:)?code-reviewer$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/hooks/reviewer-isolation.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Grep|Glob|Bash|NotebookRead",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/hooks/reviewer-isolation.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
-        "matcher": "*",
+        "matcher": "^(dev-automation-suite:)?code-(explorer|architect|reviewer)$",
         "hooks": [
           {
             "type": "command",

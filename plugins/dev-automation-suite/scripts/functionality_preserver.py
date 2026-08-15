@@ -7,6 +7,8 @@ Usage: python functionality_preserver.py <original_file> <modified_file>
 Returns: JSON report with preserved/lost functionality mapping
 """
 
+from __future__ import annotations
+
 import ast
 import json
 import sys
