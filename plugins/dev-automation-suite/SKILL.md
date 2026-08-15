@@ -3,7 +3,7 @@ name: dev-automation-suite
 description: "Complete autonomous development system covering the full lifecycle: analyse, build, review, test, fix, simplify, validate, harden, observe, ship. Orchestrates specialised subagents through eleven phases with script-enforced quality gates, evidence-driven agent output verification, stack-aware check profiles, and iterative self-correction loops. Rejects band-aid fixes, halts on breaking changes, and blocks unverified agent deliveries at the SubagentStop hook. Use whenever building features, fixing bugs, refactoring, hardening, or shipping — any multi-step development work needing autonomous production with enforced quality. Triggers on: 'build', 'implement', 'develop', 'create feature', 'fix bug', 'refactor', 'harden', 'ship', 'release', 'automate', 'iterate until done', 'development workflow', 'quality gate', 'verify output', 'build and test'."
 license: Apache-2.0
 metadata:
-  version: 3.3.0
+  version: 3.3.2
   lineages: automate-dev, production-code-quality, agent-output-verification
 ---
 
@@ -208,7 +208,7 @@ Four layers, because no one of them is sufficient:
 | Layer | Mechanism |
 |---|---|
 | Structural | `workflows/independent-review.js` — results live in script variables, so there is no author's account for a reviewer prompt to be built from |
-| Mechanical | `review_packet.py check` — seven named contamination rules, matched outside code fences |
+| Mechanical | `review_packet.py check` — eight named rules; prose rules matched outside code fences, both section hashes verified |
 | Tool boundary | `hooks/reviewer-isolation.sh` on `PreToolUse` — reads into `.dev-suite/`, logs, and transcripts are denied |
 | Contractual | the same hook on `SubagentStart` — injects the blind-review contract so it does not depend on the caller |
 
@@ -298,7 +298,7 @@ Loaded on demand to preserve context budget.
 ## Testing
 
 ```bash
-python3 tests/test_suite.py     # 120 regression tests, standard library only
+python3 tests/test_suite.py     # 130 regression tests, standard library only
 ```
 
 Covers the gate rules, premise cross-check, registry integrity, stack

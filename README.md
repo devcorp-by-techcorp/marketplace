@@ -59,6 +59,27 @@ Two rules account for most of what goes wrong here:
 claude plugin validate ./plugins/<name>
 ```
 
+## CI
+
+`.github/workflows/ci.yml` runs on every pull request:
+
+| Job | Guards |
+|---|---|
+| `tests` | The plugin's own suite, on Python 3.8, 3.11, and 3.13. Nothing is installed first — "standard library only" is asserted by installing nothing |
+| `packaging` | Executable bits in the index, manifest JSON, and that every marketplace `source` resolves to a real plugin declaring a matching name |
+| `workflows` | Plugin workflow scripts parse and contain no `import()`, which the workflow runtime rejects before a run starts |
+
+The exec-bit and source-resolution checks exist because both have already
+shipped broken here. Neither is visible in a working tree — a stripped mode
+still runs locally, and a wrong `source` still installs. A fresh clone is the
+only honest test environment for a distributable plugin, which is what CI
+gives you.
+
+`claude plugin validate` is deliberately not in CI: it needs the CLI installed
+at runtime, and a job that fails for its own reasons is one people learn to
+ignore. Run it locally before pushing — the spec rules it checks are also
+asserted in the plugin's test suite.
+
 Version lives in the plugin's own `plugin.json`, not in the marketplace entry.
 Declaring it in both lets a stale value mask the other — `plugin.json` wins
 silently.

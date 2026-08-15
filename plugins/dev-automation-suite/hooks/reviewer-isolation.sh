@@ -72,6 +72,23 @@ DENIED = re.compile(
 #: the reviewer still needs a shell for `git diff`, `grep`, and test runs.
 DENIED_IN_COMMAND = re.compile(r'\.dev-suite|\.claude/projects|subagents/')
 
+#: Which inputs of each tool name a *location*. This has to be per tool,
+#: because the same key means different things: Glob's `pattern` is a path
+#: pattern, while Grep's `pattern` is the regex being searched for. Treating
+#: them alike is wrong in both directions — it lets `Grep(glob=".dev-suite/**")`
+#: through, and it blocks a reviewer legitimately grepping the source for the
+#: string ".dev-suite".
+LOCATION_INPUTS = {
+    'Read': ('file_path',),
+    'NotebookRead': ('notebook_path',),
+    'Glob': ('pattern', 'path'),
+    'Grep': ('path', 'glob'),
+}
+
+#: Anything not named above is checked against every key that has ever meant a
+#: location. A tool added later should fail closed rather than pass silently.
+FALLBACK_INPUTS = ('file_path', 'notebook_path', 'path', 'glob', 'pattern')
+
 REVIEWER = re.compile(r'^(dev-automation-suite:)?code-reviewer$')
 
 
@@ -107,8 +124,10 @@ tool_input = payload.get('tool_input') or {}
 if not isinstance(tool_input, dict):
     sys.exit(0)
 
+tool_name = str(payload.get('tool_name') or '')
+
 candidates = []
-for key in ('file_path', 'path', 'pattern', 'notebook_path'):
+for key in LOCATION_INPUTS.get(tool_name, FALLBACK_INPUTS):
     value = tool_input.get(key)
     if isinstance(value, str):
         candidates.append((key, value, DENIED))

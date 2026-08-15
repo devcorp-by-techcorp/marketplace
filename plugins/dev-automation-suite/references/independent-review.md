@@ -108,11 +108,26 @@ Rules, each named so the report can say which line to remove:
 | `verification_block` | The author's own evidence table or status vocabulary |
 | `self_assessment` | "All tests pass", "ready for merge", "I verified" |
 | `process_reference` | `.dev-suite/`, transcripts, "my earlier attempt" |
+| `work_tampering` | A diff that is not the one the packet was built from |
 
-Prose rules are matched only outside fenced blocks. A diff legitimately
-contains `I` in a string literal and `PASS` in a test name; scanning the
-artifact for words *about* the artifact is how a checker like this starts
-rejecting correct packets and gets switched off.
+**Both sections are fenced, with a fence longer than any backtick run inside
+them.** Tasks are pasted out of issue trackers and arrive with their own
+headings and code blocks; diffs touch Markdown files. Unfenced, a task opening
+with `## Steps to reproduce` reads as an extra packet section and the build
+fails closed on a request that was recorded exactly right.
+
+Prose rules are matched only outside those fences. A diff legitimately contains
+`I` in a string literal and `PASS` in a test name; scanning the artifact for
+words *about* the artifact is how a checker like this starts rejecting correct
+packets and gets switched off. The task is exempt for a different reason: it is
+the requester's own words, pinned before work began and hash-checked, so it
+cannot be a channel for the author's framing.
+
+`work_tampering` exists because declaring a hash and never checking it is worse
+than declaring none — it reads as integrity that is not enforced. The realistic
+failure is not tampering but staleness: a packet built early, work continued,
+packet never rebuilt, and the reviewer passes an artifact that no longer
+exists.
 
 ### 3. Tool-boundary — the isolation hook
 
@@ -120,6 +135,15 @@ rejecting correct packets and gets switched off.
 `.dev-suite/`, session logs, agent transcripts, and `.jsonl` files — by path
 and by shell command. A reviewer handed a clean packet that can then open the
 author's session log has been handed nothing and told everything.
+
+Which inputs name a location is decided **per tool**, because the same key
+means different things: `Glob`'s `pattern` is a path pattern, `Grep`'s is the
+regex being searched for, and `Grep` carries the location in `path` and `glob`.
+A key-name denylist that ignores the difference is wrong in both directions —
+it lets `Grep(glob=".dev-suite/**")` through while blocking a reviewer from
+grepping the source for the literal string. Tools not in the map are checked
+against every key that has ever meant a location, so one added later fails
+closed.
 
 The reviewer keeps full access to the codebase. Reviewing a diff means reading
 the code around it; what it loses is the record of how the diff was produced.

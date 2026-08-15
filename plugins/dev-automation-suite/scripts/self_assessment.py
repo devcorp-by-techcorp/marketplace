@@ -9,6 +9,8 @@ Usage:
 Returns: Complete assessment report with pass/fail determination
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import subprocess

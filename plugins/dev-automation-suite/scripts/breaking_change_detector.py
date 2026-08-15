@@ -7,6 +7,8 @@ Usage: python breaking_change_detector.py <original_file> <modified_file>
 Returns: JSON report with breaking changes and severity levels
 """
 
+from __future__ import annotations
+
 import ast
 import json
 import sys

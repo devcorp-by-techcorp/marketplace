@@ -14,6 +14,7 @@ scripts run.
 
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 import sys
@@ -892,6 +893,41 @@ class TestReviewPacket(unittest.TestCase):
 
     # -- the checker must not eat correct packets --------------------------
 
+    def test_markdown_headings_in_the_task_do_not_break_the_packet(self):
+        """A bug report opening with `## Steps to reproduce` is an ordinary
+        task. Unfenced, its headings read as packet structure and the build
+        fails closed on a request that was recorded exactly right."""
+        task = ('Uploads time out.\n\n## Steps to reproduce\n\n'
+                '1. Upload a 2GB file\n\n## Work already tried\n\nRaising the timeout.')
+        root = Path(tempfile.mkdtemp())
+        record = review_packet.record_task(str(root), task)
+        packet = review_packet.build_packet(record, self.DIFF)
+        self.assertEqual(review_packet.check_packet(packet, record), [])
+
+    def test_a_task_containing_its_own_fence_is_wrapped_in_a_longer_one(self):
+        """Tasks get pasted out of issue trackers, code blocks and all. A fixed
+        three-backtick wrapper is closed by the first one of those."""
+        task = 'Uploads time out.\n\n```python\nupload(big)\n```'
+        root = Path(tempfile.mkdtemp())
+        record = review_packet.record_task(str(root), task)
+        packet = review_packet.build_packet(record, self.DIFF)
+        self.assertIn('````text', packet)
+        self.assertEqual(review_packet.check_packet(packet, record), [])
+
+    def test_a_diff_touching_markdown_does_not_break_the_packet(self):
+        work = ('--- a/README.md\n+++ b/README.md\n@@\n'
+                '+## Install\n+\n+```bash\n+pip install x\n+```\n')
+        packet = review_packet.build_packet(self.record, work)
+        self.assertEqual(review_packet.check_packet(packet, self.record), [])
+
+    def test_swapped_work_is_caught(self):
+        """Declaring a hash and never checking it reads as integrity that is
+        not enforced. The realistic case is staleness, not tampering: a packet
+        built early, work continued, packet never rebuilt."""
+        packet = self._packet().replace('+MAX_RETRIES = 3', '+MAX_RETRIES = 999')
+        rules = {f.rule for f in review_packet.check_packet(packet, self.record)}
+        self.assertIn('work_tampering', rules)
+
     def test_narrative_shaped_code_is_not_flagged(self):
         """The diff is the artifact. Scanning it for words *about* the artifact
         is how a checker like this starts rejecting correct packets."""
@@ -973,6 +1009,35 @@ class TestReviewerIsolation(unittest.TestCase):
                 'Read', {'file_path': 'C:\\proj\\.dev-suite\\logs\\a.log'})),
             'deny')
 
+    def test_grep_glob_cannot_reach_the_process_record(self):
+        """`glob` is a location and `path` is a location, but Grep's `pattern`
+        is a regex. A key-name denylist that ignores the difference lets
+        `Grep(glob=".dev-suite/**")` read the session while Read and Bash are
+        blocked."""
+        self.assertEqual(
+            self._decision(self._pre(
+                'Grep', {'pattern': 'secret', 'glob': '.dev-suite/**'})),
+            'deny')
+
+    def test_grepping_for_the_string_is_still_allowed(self):
+        """The mirror-image error: blocking a reviewer from searching the source
+        for the literal text, which is ordinary review of this very plugin."""
+        self.assertEqual(
+            self._decision(self._pre(
+                'Grep', {'pattern': r'\.dev-suite', 'path': 'scripts'})),
+            'allow')
+
+    def test_glob_pattern_is_a_location(self):
+        self.assertEqual(
+            self._decision(self._pre('Glob', {'pattern': '.dev-suite/**/*.json'})),
+            'deny')
+
+    def test_an_unrecognised_tool_fails_closed(self):
+        """A file-reading tool added later must not pass silently."""
+        self.assertEqual(
+            self._decision(self._pre('SomeNewReader', {'glob': '.dev-suite/**'})),
+            'deny')
+
     def test_other_agents_are_untouched(self):
         self.assertEqual(
             self._decision(self._pre(
@@ -1042,6 +1107,78 @@ class TestBlindReviewWiring(unittest.TestCase):
         self.assertIn("name: 'independent-review'", source)
         self.assertNotIn('import(', source,
                          'the workflow runtime rejects a script containing import()')
+
+
+class TestPythonFloorIsReal(unittest.TestCase):
+    """The package advertises Python 3.8+. That claim is only worth making if
+    something checks it — annotations are evaluated at definition time, so
+    `def f() -> list[str]` raises TypeError on 3.8 and nothing here would
+    notice until a user on an old interpreter hit it.
+    """
+
+    #: PEP 585 builtin generics: `list[str]` is a runtime subscript of the
+    #: builtin, valid from 3.9. Under `from __future__ import annotations`
+    #: every annotation is a string and never evaluated, so 3.8 is fine.
+    PEP_585 = {'list', 'dict', 'tuple', 'set', 'frozenset', 'type'}
+
+    def _annotations(self, tree):
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                arg_list = list(node.args.args) + list(node.args.kwonlyargs)
+                arg_list += list(getattr(node.args, 'posonlyargs', []))
+                for arg in arg_list:
+                    if arg.annotation is not None:
+                        yield arg.annotation
+                if node.returns is not None:
+                    yield node.returns
+            elif isinstance(node, ast.AnnAssign) and node.annotation is not None:
+                yield node.annotation
+
+    def _offending(self, annotation):
+        """Constructs that are evaluated at definition time and fail on 3.8."""
+        for node in ast.walk(annotation):
+            if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+                if node.value.id in self.PEP_585:
+                    return f'{node.value.id}[...] (PEP 585, needs 3.9)'
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+                return 'X | Y union (PEP 604, needs 3.10)'
+        return None
+
+    def test_modern_annotations_are_postponed(self):
+        for path in sorted((SUITE_ROOT / 'scripts').glob('*.py')):
+            source = path.read_text()
+            tree = ast.parse(source)
+            postponed = any(
+                isinstance(n, ast.ImportFrom) and n.module == '__future__'
+                and any(a.name == 'annotations' for a in n.names)
+                for n in tree.body
+            )
+            if postponed:
+                continue
+            with self.subTest(script=path.name):
+                for annotation in self._annotations(tree):
+                    offence = self._offending(annotation)
+                    self.assertIsNone(
+                        offence,
+                        f'{path.name}:{annotation.lineno} uses {offence} without '
+                        "`from __future__ import annotations`. It is evaluated at "
+                        'definition time and raises TypeError on the advertised '
+                        'floor. Add the future import, or change the floor.',
+                    )
+
+    def test_advertised_floor_matches_the_ci_matrix(self):
+        """A README that says 3.8 and a matrix that starts at 3.11 is a claim
+        nobody tests."""
+        import re
+        workflow = (SUITE_ROOT.parent.parent / '.github' / 'workflows' / 'ci.yml')
+        if not workflow.is_file():
+            self.skipTest('no CI workflow in this checkout')
+        text = workflow.read_text()
+        advertised = re.search(
+            r'Python (\d+\.\d+)\+', (SUITE_ROOT / 'SKILL.md').read_text())
+        self.assertIsNotNone(advertised, 'SKILL.md states no Python floor')
+        self.assertIn(f"'{advertised.group(1)}'", text,
+                      'the advertised floor is not in the CI matrix')
 
 
 if __name__ == '__main__':

@@ -4,6 +4,66 @@ All notable changes to the dev-automation-suite.
 
 Format follows Keep a Changelog. Versioning is semantic.
 
+## [3.3.2] — 2026-08-15
+
+Three defects in the independent-review machinery, found by automated review on
+the pull request. All three were real; all three are now pinned by a test that
+fails without the fix.
+
+### Fixed
+
+- **A task containing Markdown headings failed to build.** The task was written
+  into the packet unfenced, so a bug report opening with `## Steps to reproduce`
+  read as an extra packet section — and a task containing its own `## Work`
+  truncated the section split. The build failed closed on a request that had
+  been recorded exactly right, and blamed the *work* for it in the error
+  message. Both sections are now fenced, with a fence longer than any backtick
+  run inside them, since tasks arrive from issue trackers with code blocks in
+  them and diffs touch Markdown files.
+
+- **`work_sha256` was written into every packet and never checked.** A packet
+  whose diff was edited after the build still read `CLEAN`. Declaring a hash and
+  not enforcing it is worse than declaring none. The realistic failure here is
+  staleness rather than tampering — a packet built early, work continued, packet
+  never rebuilt — and the reviewer then passes an artifact that no longer
+  exists. Now surfaced as `work_tampering`.
+
+- **`Grep(glob: ".dev-suite/**")` bypassed the reviewer isolation hook.** The
+  hook checked a fixed list of key names, and `glob` was not on it — so the
+  reviewer could search session state while direct `Read` and `Bash` access
+  were blocked. Location inputs are now resolved per tool, which also fixes the
+  mirror-image error: `Grep`'s `pattern` is a regex, not a path, and matching
+  it blocked a reviewer from grepping the source for the literal string
+  `.dev-suite`. Unrecognised tools are checked against every key that has ever
+  meant a location, so one added later fails closed.
+
+### Tests
+
+122 → 130.
+
+## [3.3.1] — 2026-08-15
+
+### Fixed
+
+- **The advertised Python floor was not real.** Five scripts annotate with
+  `list[...]` without `from __future__ import annotations`. Annotations are
+  evaluated at definition time, so those modules raise `TypeError` on Python
+  3.8 — the version `SKILL.md` and `plugin.json` both advertise. Nothing here
+  would have noticed until a user on an old interpreter hit it, because every
+  development machine runs something newer. Added the future import rather than
+  quietly raising the floor: the claim was the contract.
+
+### Added
+
+- A regression test that walks each script's AST and fails any PEP 585
+  (`list[str]`) or PEP 604 (`X | Y`) annotation in a module without postponed
+  annotations, naming the file, line, and which PEP puts the floor where.
+  A second test asserts the advertised floor appears in the CI matrix — a
+  README that says 3.8 and a matrix starting at 3.11 is a claim nobody tests.
+- Repository CI (`.github/workflows/ci.yml`): the suite's tests on 3.8/3.11/3.13
+  with nothing installed first, executable bits checked against the git index,
+  marketplace `source` resolution, and workflow-script parsing.
+
 ## [3.3.0] — 2026-08-15
 
 Review and validation are now performed by an agent that never sees how the

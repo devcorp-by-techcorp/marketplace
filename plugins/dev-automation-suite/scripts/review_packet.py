@@ -228,12 +228,37 @@ def load_task(project_root: str) -> dict:
 # Building
 # --------------------------------------------------------------------------
 
+def fence_for(*bodies: str) -> str:
+    """A fence longer than any backtick run inside the content it wraps.
+
+    Tasks get pasted out of issue trackers and diffs touch Markdown files, so
+    both sections routinely contain their own code fences. A fixed three
+    backticks would be closed by the first one of those, and everything after
+    it would be read as packet structure.
+    """
+    longest = 0
+    for body in bodies:
+        for run in re.findall(r'`+', body):
+            longest = max(longest, len(run))
+    return '`' * max(3, longest + 1)
+
+
 def build_packet(task_record: dict, work: str) -> str:
-    """Assemble the packet. The work is fenced so ``check`` can tell artifact
-    from prose; an unfenced diff would be scanned as though it were narrative."""
+    """Assemble the packet.
+
+    Both sections are fenced. For the work that keeps the artifact from being
+    scanned as though it were narrative. For the task it keeps the requester's
+    own Markdown from being read as packet structure: a bug report opening with
+    ``## Steps to reproduce`` is an ordinary task, and an unfenced packet would
+    reject it as an extra section — failing closed on a request that was
+    recorded exactly right.
+    """
     work = work.rstrip('\n')
     if not work.strip():
         raise ValueError('refusing to build a packet with no work in it')
+
+    task = task_record['task'].strip()
+    fence = fence_for(task, work)
 
     header = '\n'.join([
         HEADER_OPEN,
@@ -247,13 +272,15 @@ def build_packet(task_record: dict, work: str) -> str:
         '',
         TASK_HEADING,
         '',
-        task_record['task'].strip(),
+        f'{fence}text',
+        task,
+        fence,
         '',
         WORK_HEADING,
         '',
-        '```diff',
+        f'{fence}diff',
         work,
-        '```',
+        fence,
         '',
     ])
 
@@ -277,36 +304,81 @@ def parse_header(text: str) -> dict:
     return fields
 
 
-def split_prose_and_fenced(lines: list[str]) -> tuple[list[tuple[int, str]], list[str]]:
-    """Return (prose lines with 1-based numbers, fenced lines).
+def _fence_spans(lines: list[str]) -> list[tuple[int, int]]:
+    """Index ranges (open, close) of fenced blocks, inclusive of both markers.
 
-    Fence tracking is deliberately simple — an opening ``` toggles until the
-    next one. Nested fences inside a diff would break it, but a diff containing
-    a fence is itself a signal worth failing on rather than silently guessing.
+    CommonMark: a fence opens with three or more backticks and is closed by a
+    line of at least as many. Tracking the opening length matters here — the
+    builder deliberately uses a longer fence when the content contains one, so
+    a fixed-length reader would close the block at the wrong line.
     """
-    prose: list[tuple[int, str]] = []
-    fenced: list[str] = []
-    in_fence = False
-    for number, line in enumerate(lines, start=1):
-        if line.lstrip().startswith('```'):
-            in_fence = not in_fence
+    spans: list[tuple[int, int]] = []
+    open_at: Optional[int] = None
+    open_len = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith('```'):
             continue
-        (fenced if in_fence else prose).append(line if in_fence else (number, line))
-    return prose, fenced
+        run = len(stripped) - len(stripped.lstrip('`'))
+        if open_at is None:
+            open_at, open_len = i, run
+        elif run >= open_len and stripped == '`' * run:
+            spans.append((open_at, i))
+            open_at, open_len = None, 0
+    if open_at is not None:
+        spans.append((open_at, len(lines) - 1))   # unterminated: treat as fenced
+    return spans
+
+
+def _in_span(index: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start <= index <= end for start, end in spans)
+
+
+def prose_lines(lines: list[str]) -> list[tuple[int, str]]:
+    """1-based numbered lines outside every fenced block."""
+    spans = _fence_spans(lines)
+    return [(i + 1, line) for i, line in enumerate(lines) if not _in_span(i, spans)]
 
 
 def headings(lines: list[str]) -> list[tuple[int, str]]:
-    """Headings outside fenced blocks. A ``##`` inside a diff is a changed
-    Markdown file, not a packet section."""
-    found = []
-    in_fence = False
-    for number, line in enumerate(lines, start=1):
-        if line.lstrip().startswith('```'):
-            in_fence = not in_fence
-            continue
-        if not in_fence and re.match(r'^#{1,6}\s', line):
-            found.append((number, line.strip()))
-    return found
+    """Headings outside fenced blocks — the packet's structure.
+
+    A ``##`` inside a fence is content: either the requester's own Markdown or
+    a changed Markdown file in the diff. Neither is a packet section.
+    """
+    spans = _fence_spans(lines)
+    return [
+        (i + 1, line.strip())
+        for i, line in enumerate(lines)
+        if not _in_span(i, spans) and re.match(r'^#{1,6}\s', line)
+    ]
+
+
+def section_body(lines: list[str], heading: str) -> str:
+    """Content of one section, with its wrapping fence removed if it has one.
+
+    Runs to the next *structural* heading, so a heading inside the section's
+    own fenced content does not truncate it.
+    """
+    structure = headings(lines)
+    start = next((n for n, h in structure if h == heading), None)
+    if start is None:
+        return ''
+    later = [n for n, _ in structure if n > start]
+    end = (later[0] - 1) if later else len(lines)
+    body = lines[start:end]           # start is 1-based, so this skips the heading
+
+    while body and not body[0].strip():
+        body.pop(0)
+    while body and not body[-1].strip():
+        body.pop()
+
+    if body and body[0].strip().startswith('```'):
+        opener = body[0].strip()
+        run = len(opener) - len(opener.lstrip('`'))
+        if body[-1].strip() == '`' * run:
+            body = body[1:-1]
+    return '\n'.join(body).strip()
 
 
 def check_packet(
@@ -338,7 +410,8 @@ def check_packet(
 
     # -- task integrity ----------------------------------------------------
     header = parse_header(text)
-    task_text = section_text(lines, TASK_HEADING, WORK_HEADING).strip()
+    task_text = section_body(lines, TASK_HEADING)
+    work_text = section_body(lines, WORK_HEADING)
 
     if task_text:
         actual = sha256(task_text)
@@ -356,9 +429,31 @@ def check_packet(
                 'rewritten task tells the reviewer what to conclude',
             ))
 
+    # -- work integrity ----------------------------------------------------
+    #
+    # Declaring a hash and never checking it is worse than declaring nothing:
+    # it reads as integrity that is not enforced. The realistic failure is not
+    # tampering but staleness — a packet built early, work continued, packet
+    # never rebuilt — and the reviewer then passes an artifact that no longer
+    # exists.
+    declared_work = header.get('work_sha256')
+    if declared_work and work_text:
+        actual_work = sha256(work_text)
+        if declared_work != actual_work:
+            findings.append(Finding(
+                'work_tampering', 0,
+                f'declared {declared_work[:12]}, actual {actual_work[:12]}',
+                'the work in the packet is not the work the packet was built '
+                'from — the reviewer would be reviewing a different diff, or a '
+                'stale one, from the one the packet claims',
+            ))
+
     # -- prose contamination ----------------------------------------------
-    prose, _ = split_prose_and_fenced(lines)
-    for number, line in prose:
+    #
+    # Fenced content is exempt. For the work that is the artifact; for the task
+    # it is the requester's own words, pinned by hash before work began and
+    # cross-checked above, so it cannot be a channel for the author's framing.
+    for number, line in prose_lines(lines):
         stripped = line.strip()
         if not stripped or stripped in (TASK_HEADING, WORK_HEADING):
             continue
@@ -374,20 +469,6 @@ def check_packet(
                 break
 
     return findings
-
-
-def section_text(lines: list[str], start_heading: str, end_heading: str) -> str:
-    """Text between two headings, exclusive."""
-    try:
-        start = next(i for i, l in enumerate(lines) if l.strip() == start_heading)
-    except StopIteration:
-        return ''
-    end = len(lines)
-    for i in range(start + 1, len(lines)):
-        if lines[i].strip() == end_heading:
-            end = i
-            break
-    return '\n'.join(lines[start + 1:end])
 
 
 # --------------------------------------------------------------------------
@@ -461,8 +542,8 @@ def cmd_build(args: argparse.Namespace) -> int:
     findings = check_packet(packet, record)
     if findings:
         print(render(findings, 'freshly built packet'), file=sys.stderr)
-        print('\nthe supplied work carries process narrative; packet not written',
-              file=sys.stderr)
+        print('\npacket not written — the material above would have reached the '
+              'reviewer', file=sys.stderr)
         return CONTAMINATED
 
     if args.output:
