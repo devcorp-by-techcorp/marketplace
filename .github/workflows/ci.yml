@@ -85,6 +85,21 @@ jobs:
                      'plugins/*/hooks/*.sh')
           exit $fail
 
+      - name: No runtime state is tracked
+        # The suite writes .dev-suite/ into whatever project it runs against,
+        # and developing the plugin means running it against this one. Session
+        # logs carry agent output. .gitignore keeps them out; this catches a
+        # force-add, which is the only way past it.
+        run: |
+          set -euo pipefail
+          tracked=$(git ls-files '.dev-suite' '*/.dev-suite/*' '**/__pycache__/*' || true)
+          if [ -n "$tracked" ]; then
+            echo "::error::runtime state is tracked:"
+            echo "$tracked"
+            exit 1
+          fi
+          echo 'ok: no runtime state tracked'
+
       - name: Manifests are well-formed JSON
         run: |
           set -euo pipefail

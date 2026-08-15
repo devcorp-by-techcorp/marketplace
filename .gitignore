@@ -1,0 +1,12 @@
+# Runtime state the suite writes into whatever project it runs against.
+#
+# Developing the plugin means running it against this repository, so the state
+# lands here at the root. The plugin ships its own .gitignore, but that one only
+# covers paths beneath it — the root needs its own or these turn up untracked
+# after every test run.
+#
+# Session logs carry agent output. They are not artifacts to commit.
+.dev-suite/
+
+__pycache__/
+*.py[cod]
