@@ -1,4 +1,4 @@
-# Model Deployment Strategy — Opus 4.7 Optimised
+# Model Deployment Strategy — Claude 5 Family
 
 ## Table of Contents
 
@@ -6,40 +6,49 @@
 2. [Difficulty Classification](#difficulty-classification)
 3. [Model Routing Matrix](#model-routing-matrix)
 4. [Effort Level Configuration](#effort-level-configuration)
-5. [Migration from Opus 4.6 and Earlier](#migration-from-opus-46-and-earlier)
-6. [Prompt Adjustments for Opus 4.7](#prompt-adjustments-for-opus-47)
+5. [Keeping Model IDs Current](#keeping-model-ids-current)
+6. [Prompt Adjustments](#prompt-adjustments)
 
 ---
 
 ## Model Family Overview
 
-The automate-dev skill is optimised for **Claude Opus 4.7** (`claude-opus-4-7`,
-released 16 April 2026) as the flagship model for high-difficulty workflows,
-while retaining Sonnet 4.6 for exploration and breadth-focused work.
+The suite routes high-difficulty work to **Claude Opus 5** (`claude-opus-5`) and
+breadth-focused work to **Claude Sonnet 5** (`claude-sonnet-5`).
 
-| Model | API Identifier | Primary Use |
-|-------|---------------|-------------|
-| Claude Opus 4.7 | `claude-opus-4-7` | High-difficulty reasoning, review, assessment, architecture |
-| Claude Sonnet 4.6 | `claude-sonnet-4-6` | Exploration, tracing, breadth-focused work |
-| Claude Haiku 4.5 | `claude-haiku-4-5` | Simple classification, routing, quick validation (not used in this skill by default) |
+| Model | API Identifier | Context | Primary Use |
+|-------|---------------|---------|-------------|
+| Claude Opus 5 | `claude-opus-5` | 1M | High-difficulty reasoning, review, assessment, architecture |
+| Claude Sonnet 5 | `claude-sonnet-5` | 1M | Exploration, tracing, breadth-focused work |
+| Claude Haiku 4.5 | `claude-haiku-4-5` | 200K | Simple classification, routing, quick validation (not used in this skill by default) |
 
-### Opus 4.7 Capabilities Leveraged
+IDs are pinned explicitly rather than using the `opus` / `sonnet` aliases, so a
+run is reproducible and a model change is a reviewable diff rather than a silent
+shift. That trade has a cost — see [Keeping Model IDs Current](#keeping-model-ids-current).
 
-- **1M token context window** at standard API pricing — handles large codebases
+### Capabilities Leveraged
+
+- **1M token context window** on both Opus 5 and Sonnet 5 — handles large codebases
 - **128k max output tokens** — sufficient for comprehensive review reports
-- **xhigh effort level** (new, default in Claude Code) — between `high` and `max`
-- **Adaptive thinking** — automatic reasoning depth based on task complexity
-- **Prompt caching** — reduces cost on repeated SKILL.md / reference / .CLAUDE.md loads
-- **Task budgets (public beta)** — enforced token spend limits for agentic loops
-- **High-resolution vision** (3.75 MP) — useful for UI review with screenshots
+- **xhigh effort level** — between `high` and `max`; the recommended setting for
+  coding and agentic work
+- **Adaptive thinking** — on by default on Opus 5; reasoning depth scales with
+  task complexity
+- **Prompt caching** — reduces cost on repeated SKILL.md / reference / CLAUDE.md loads
+- **Task budgets (beta)** — enforced token spend limits for agentic loops
+- **High-resolution vision** — 2576px long edge, useful for UI review with screenshots
 
-### Opus 4.7 Pricing (as of release)
+### Pricing
 
-- Input: $5 per million tokens
-- Output: $25 per million tokens
-- Unchanged from Opus 4.6
-- Note: New tokenizer produces 1.0–1.35× more tokens than Opus 4.6 for the
-  same text — re-benchmark cost estimates
+| Model | Input (per MTok) | Output (per MTok) |
+|-------|-----------------|-------------------|
+| Claude Opus 5 | $5 | $25 |
+| Claude Sonnet 5 | $3 | $15 |
+| Claude Haiku 4.5 | $1 | $5 |
+
+Prices are Anthropic first-party API rates. Bedrock and Vertex are
+partner-operated and priced separately. Verify against current published pricing
+before using these figures for budgeting — this table is a snapshot, not a feed.
 
 ---
 
@@ -54,9 +63,9 @@ model selection and effort level.
 |-------|----------------|-------|--------|
 | **low** | Single-file reads, obvious fixes, simple lookups, formatting | sonnet | default |
 | **medium** | Multi-file changes with clear scope, routine refactors, tracing | sonnet | `high` |
-| **high** | Code review, architectural decisions, self-assessment, quality gates | **claude-opus-4-7** | `xhigh` |
-| **xhigh** | Complex multi-file refactoring, subtle debugging, security review | **claude-opus-4-7** | `xhigh` |
-| **max** | Formal verification, algorithmic proofs, cryptographic review | **claude-opus-4-7** | `max` |
+| **high** | Code review, architectural decisions, self-assessment, quality gates | **claude-opus-5** | `xhigh` |
+| **xhigh** | Complex multi-file refactoring, subtle debugging, security review | **claude-opus-5** | `xhigh` |
+| **max** | Formal verification, algorithmic proofs, cryptographic review | **claude-opus-5** | `max` |
 
 ### Examples by Phase
 
@@ -65,22 +74,22 @@ model selection and effort level.
 | 1 (Analyse) | Codebase exploration | medium | sonnet |
 | 1 (Analyse) | Dependency mapping | medium | sonnet |
 | 2 (Build) | Routine implementation | medium | sonnet |
-| 2 (Build) | Architectural design | high | **opus-4-7** |
-| 3 (Review) | Quality review (simplicity) | high | **opus-4-7** |
-| 3 (Review) | Functional correctness review | high | **opus-4-7** |
-| 3 (Review) | Conventions review | high | **opus-4-7** |
+| 2 (Build) | Architectural design | high | **opus-5** |
+| 3 (Review) | Quality review (simplicity) | high | **opus-5** |
+| 3 (Review) | Functional correctness review | high | **opus-5** |
+| 3 (Review) | Conventions review | high | **opus-5** |
 | 4 (Test) | Test execution | low-medium | sonnet |
-| 5 (Fix) | Root cause analysis for complex bugs | high | **opus-4-7** |
+| 5 (Fix) | Root cause analysis for complex bugs | high | **opus-5** |
 | 5 (Fix) | Straightforward bug fixes | medium | sonnet |
-| 6 (Simplify) | Refactoring analysis | high | **opus-4-7** |
-| 7 (Validate) | Final quality gate assessment | high | **opus-4-7** |
-| 7 (Validate) | Self-review of agent outputs | high | **opus-4-7** |
+| 6 (Simplify) | Refactoring analysis | high | **opus-5** |
+| 7 (Validate) | Final quality gate assessment | high | **opus-5** |
+| 7 (Validate) | Self-review of agent outputs | high | **opus-5** |
 | 8 (Ship) | Deployment readiness check | medium | sonnet |
 
-### Self-Review Always Uses Opus 4.7
+### Self-Review Always Uses Opus 5
 
 Any workflow step involving **review of agent output** by another agent
-must use Opus 4.7. This includes:
+must use Opus 5. This includes:
 
 - Reviewing code written by subagents
 - Validating architectural decisions produced by code-architect
@@ -97,8 +106,8 @@ must use Opus 4.7. This includes:
 | Agent | Model | Effort | Difficulty Bucket |
 |-------|-------|--------|-------------------|
 | code-explorer | `sonnet` | `high` | medium |
-| code-architect | `claude-opus-4-7` | `xhigh` | high |
-| code-reviewer | `claude-opus-4-7` | `xhigh` | high+ |
+| code-architect | `claude-opus-5` | `xhigh` | high |
+| code-reviewer | `claude-opus-5` | `xhigh` | high+ |
 
 ### Phase Routing
 
@@ -108,24 +117,24 @@ Phase 1 (Analyse):
   └─ dev_orchestrator.py   → script (rule-based inventory)
 
 Phase 2 (Build):
-  ├─ code-architect × 2-3  → claude-opus-4-7 xhigh (parallel design)
+  ├─ code-architect × 2-3  → claude-opus-5 xhigh (parallel design)
   └─ Implementation        → Main agent (varies by task difficulty)
 
 Phase 3 (Review):
-  ├─ code-reviewer × 3     → claude-opus-4-7 xhigh (parallel review)
+  ├─ code-reviewer × 3     → claude-opus-5 xhigh (parallel review)
   ├─ code_reviewer.py      → script (band-aid + security detection)
   └─ fix_validator.py      → script (preservation + breaking changes)
 
 Phase 5 (Fix):
-  ├─ Root cause analysis   → claude-opus-4-7 xhigh (complex bugs)
+  ├─ Root cause analysis   → claude-opus-5 xhigh (complex bugs)
   └─ fix_validator.py      → script (band-aid detection in diffs)
 
 Phase 6 (Simplify):
-  ├─ Simplification review → claude-opus-4-7 xhigh (judgment)
+  ├─ Simplification review → claude-opus-5 xhigh (judgment)
   └─ code_simplifier.py    → script (structural analysis)
 
 Phase 7 (Validate):
-  ├─ code-reviewer × 3     → claude-opus-4-7 xhigh (final review)
+  ├─ code-reviewer × 3     → claude-opus-5 xhigh (final review)
   └─ dev_orchestrator.py   → script (full gate check)
 ```
 
@@ -133,7 +142,7 @@ Phase 7 (Validate):
 
 ## Effort Level Configuration
 
-Opus 4.7 introduces `xhigh` as a new effort level between `high` and `max`.
+Opus 5 introduces `xhigh` as a new effort level between `high` and `max`.
 Choose effort based on task complexity:
 
 | Effort | Use For | Latency Impact | Cost Impact |
@@ -150,7 +159,7 @@ Choose effort based on task complexity:
 /effort xhigh
 
 # Per-command (if supported)
-/model claude-opus-4-7 --effort xhigh
+/model claude-opus-5 --effort xhigh
 
 # Environment variable
 export ANTHROPIC_DEFAULT_EFFORT=xhigh
@@ -161,46 +170,62 @@ export ANTHROPIC_DEFAULT_EFFORT=xhigh
 ```yaml
 ---
 name: code-reviewer
-model: claude-opus-4-7
+model: claude-opus-5
 effort: xhigh
 ---
 ```
 
 ---
 
-## Migration from Opus 4.6 and Earlier
+## Keeping Model IDs Current
 
-If transitioning from an earlier automate-dev deployment using Opus 4.6 or
-the `opus` alias, apply these changes:
+Pinning explicit IDs buys reproducibility and pays for it in maintenance: a
+pinned ID does not follow the model line forward, and nothing in the suite
+fails when one goes stale. A superseded model keeps serving, so the symptom is
+silent — runs simply stop getting the current generation.
 
-### Required Changes
+The IDs live in four places. Change them together:
 
-1. **Pin model identifier**: Replace `opus` with `claude-opus-4-7` in agent
-   frontmatter to avoid alias drift
-2. **Add effort level**: Set `effort: xhigh` for code-architect and code-reviewer
-3. **Remove sampling parameters**: Opus 4.7 returns 400 errors for non-default
-   `temperature`, `top_p`, `top_k` — remove these from any API calls
-4. **Re-benchmark token budgets**: New tokenizer produces 1.0–1.35× more tokens
-   — increase `max_tokens` by at least 35% headroom
-5. **Update prompt caching keys**: Different tokenization means different
-   cache keys for previously cached content
+| Location | What to change |
+|---|---|
+| `agents/*.md` | the `model:` frontmatter field |
+| `SKILL.md` | the agent roster and model routing tables |
+| `references/model-deployment.md` | this file's overview, routing, and pricing tables |
+| `scripts/token_budget_monitor.py` | `DEFAULT_MODEL` and `MODEL_PRICING` |
 
-### Behavioural Changes to Expect
+Keep superseded IDs in `MODEL_PRICING` when you move the default — they remain
+callable, and a run that pins one should still cost out correctly.
 
-Opus 4.7 follows instructions more literally than 4.6. If your prompts
-relied on inference or loose interpretation:
+### Migrating off a superseded pin
 
-- **Before (4.6)**: "Review the code for issues" — model infers scope
-- **After (4.7)**: "Review the code in [files] for: (1) bugs, (2) security, (3) conventions. Return top 5 issues ranked by severity with file:line references."
+1. **Re-baseline token budgets** with `count_tokens` against the new model
+   rather than scaling the old numbers by a fixed multiplier.
+2. **Expect prompt-cache misses** on the first run: caches are model-scoped, so
+   the new ID writes fresh entries.
+3. **Check sampling parameters**: current models reject non-default
+   `temperature`, `top_p`, and `top_k`. Steer with prompting instead.
+4. **Re-check effort**: `xhigh` remains the recommendation for coding and
+   agentic work, but lower levels have grown more capable — sweep `medium` and
+   `high` against your own evals before assuming the old setting still fits.
 
-Opus 4.7 also spawns fewer subagents by default. If you need parallel
-exploration, explicitly instruct the model:
+### Behavioural changes to expect
 
-- "Launch 3 code-explorer subagents in parallel, one for each of: [a], [b], [c]"
+Current models follow instructions more literally than the 4.x line. Prompts
+that relied on the model inferring scope should state it:
+
+- **Loose**: "Review the code for issues" — the model infers scope
+- **Explicit**: "Review the code in [files] for: (1) bugs, (2) security,
+  (3) conventions. Return the top 5 issues ranked by severity with file:line
+  references."
+
+Delegation behaviour also moves between generations — some models under-reach
+for subagents and need encouragement, others over-reach and need a cap. Re-tune
+the delegation guidance in the orchestrator prompt when you change the pin
+rather than carrying the previous generation's wording forward.
 
 ---
 
-## Prompt Adjustments for Opus 4.7
+## Prompt Adjustments for Opus 5
 
 ### Be Explicit About Scope
 
@@ -247,7 +272,7 @@ Each subagent must return a list of 5-10 key files."
 
 ### Calibrate Response Length
 
-Opus 4.7 calibrates verbosity to perceived task complexity. If you need
+Opus 5 calibrates verbosity to perceived task complexity. If you need
 concise output, say so explicitly:
 
 ```

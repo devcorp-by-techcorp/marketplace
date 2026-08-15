@@ -3,7 +3,7 @@ name: dev-automation-suite
 description: "Complete autonomous development system covering the full lifecycle: analyse, build, review, test, fix, simplify, validate, harden, observe, ship. Orchestrates specialised subagents through eleven phases with script-enforced quality gates, evidence-driven agent output verification, stack-aware check profiles, and iterative self-correction loops. Rejects band-aid fixes, halts on breaking changes, and blocks unverified agent deliveries at the SubagentStop hook. Use whenever building features, fixing bugs, refactoring, hardening, or shipping — any multi-step development work needing autonomous production with enforced quality. Triggers on: 'build', 'implement', 'develop', 'create feature', 'fix bug', 'refactor', 'harden', 'ship', 'release', 'automate', 'iterate until done', 'development workflow', 'quality gate', 'verify output', 'build and test'."
 license: Apache-2.0
 metadata:
-  version: 3.1.1
+  version: 3.1.2
   lineages: automate-dev, production-code-quality, agent-output-verification
 ---
 
@@ -114,8 +114,8 @@ pass, by design.
 | Agent | Role | Model | Effort | Phases |
 |-------|------|-------|--------|--------|
 | **code-explorer** | Codebase tracing, pattern discovery | `sonnet` | high | 1 |
-| **code-architect** | Architecture design, implementation blueprints | `claude-opus-4-7` | xhigh | 2 |
-| **code-reviewer** | Quality review — simplicity, correctness, conventions | `claude-opus-4-7` | xhigh | 3, 7 |
+| **code-architect** | Architecture design, implementation blueprints | `claude-opus-5` | xhigh | 2 |
+| **code-reviewer** | Quality review — simplicity, correctness, conventions | `claude-opus-5` | xhigh | 3, 7 |
 
 All three carry an `## Exit Criteria — Pre-Output Verification` section. That
 section is the contract the `SubagentStop` hook enforces; it is not optional
@@ -214,11 +214,11 @@ See `references/stack-profiles.md` to add a profile.
 |-----------|-------|--------|----------|
 | low | sonnet | default | Simple reads, formatting |
 | medium | sonnet | high | Multi-file tracing, routine refactors |
-| **high** | **claude-opus-4-7** | **xhigh** | Review, architecture, quality gates |
-| xhigh | **claude-opus-4-7** | **xhigh** | Complex refactoring, subtle debugging |
-| max | **claude-opus-4-7** | **max** | Formal verification, security audits |
+| **high** | **claude-opus-5** | **xhigh** | Review, architecture, quality gates |
+| xhigh | **claude-opus-5** | **xhigh** | Complex refactoring, subtle debugging |
+| max | **claude-opus-5** | **max** | Formal verification, security audits |
 
-Opus 4.7 is required for any agent reviewing another agent's work, all
+Opus 5 is required for any agent reviewing another agent's work, all
 architectural decisions, and Phase 7 validation. See
 `references/model-deployment.md`.
 

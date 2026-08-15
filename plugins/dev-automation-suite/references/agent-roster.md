@@ -5,17 +5,17 @@
 | Agent | Role | Model | Effort | Colour | Phases |
 |---|---|---|---|---|---|
 | `code-explorer` | Codebase tracing, pattern discovery | `sonnet` | high | yellow | 1 |
-| `code-architect` | Architecture design, implementation blueprints | `claude-opus-4-7` | xhigh | green | 2 |
-| `code-reviewer` | Quality review — simplicity, correctness, conventions | `claude-opus-4-7` | xhigh | red | 3, 7 |
+| `code-architect` | Architecture design, implementation blueprints | `claude-opus-5` | xhigh | green | 2 |
+| `code-reviewer` | Quality review — simplicity, correctness, conventions | `claude-opus-5` | xhigh | red | 3, 7 |
 
 **Routing rationale**
 
 - `code-explorer` uses Sonnet: exploration is breadth-focused (medium
   difficulty), and Sonnet is fast and cost-effective for tracing across many
   files.
-- `code-architect` uses Opus 4.7 at `xhigh`: architectural decisions are complex
+- `code-architect` uses Opus 5 at `xhigh`: architectural decisions are complex
   multi-file judgments that benefit from deeper reasoning.
-- `code-reviewer` uses Opus 4.7 at `xhigh`: reviewing another agent's output is
+- `code-reviewer` uses Opus 5 at `xhigh`: reviewing another agent's output is
   self-assessment territory, classified high difficulty or above.
 
 All three carry `## Exit Criteria — Pre-Output Verification`. That section is

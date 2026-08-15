@@ -2,7 +2,7 @@
 name: code-reviewer
 description: Expert code reviewer that evaluates code for simplicity, DRY principles, elegance, functional correctness, bug detection, and project convention adherence. Launch with a specific review focus for best results.
 tools: Glob, Grep, LS, Read, NotebookRead, WebFetch, TodoWrite, WebSearch, KillShell, BashOutput
-model: claude-opus-4-7
+model: claude-opus-5
 effort: xhigh
 color: red
 ---

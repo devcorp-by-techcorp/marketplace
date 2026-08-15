@@ -248,3 +248,85 @@ The marketplace entry deliberately omits `version`. Claude Code always takes the
 `plugin.json` value without warning when both are set, so declaring it twice
 lets a stale manifest silently mask the marketplace value. A regression test
 asserts the version appears in exactly one place.
+
+## [3.1.2] — 2026-08-15
+
+Fixes the `SubagentStop` gate, which did not function in production. Found by
+independent review; the defect shipped in every release from 3.0.0 onward.
+
+### Fixed
+
+- `hooks/subagent-verification-gate.sh` now reads the agent's output from
+  `last_assistant_message`, the field `SubagentStop` actually carries it in.
+  The hook previously looked only for `output`, `response`, `text`, `content`,
+  `message` and `result` — none of which exist on this event. Extraction always
+  fell through to the raw payload, which contains no verification block, which
+  the gate correctly classified as unparseable, which fails closed. **Every
+  subagent delivery was blocked, on every stop, regardless of its content.**
+- A block is now emitted inside the `hookSpecificOutput` envelope
+  (`{"hookEventName": "SubagentStop", "decision": "block"}`), where the event
+  reads it. The top-level `decision` key is retained alongside it for older CLI
+  builds. An approval now emits no decision key at all: `"block"` is the only
+  value the contract defines, and the previous `"decision": "approve"` was
+  indistinguishable from garbage.
+- `stop_hook_active` is now honoured. The gate approves immediately when a stop
+  hook is already driving the session, instead of blocking into a loop.
+- `bin/dev-suite-stack` no longer mistakes a flag's value for the positional
+  project root. `--start-index 12` consumed `12` as the path and then passed
+  `--start-index` on with nothing after it, so the documented invocation
+  `dev-suite-stack --checklist --start-index 12` always failed to parse.
+
+### Changed
+
+- `TestHook` payloads are now built by `_subagent_stop_payload()`, which uses
+  the real `SubagentStop` field names. This is the root cause, not a detail:
+  all 81 tests passed against a payload shape the runtime never sends, so the
+  suite confirmed a contract that existed only in its own fixtures. New hook
+  tests must go through the builder rather than hand-rolling a dict.
+- `references/hooks.md` documented the wrong payload fields and the wrong
+  decision object, and would have taught the defect to whoever fixed it.
+
+- `tests/test_suite.py::TestHook` now points `CLAUDE_PROJECT_DIR` at a temp
+  directory for each hook invocation. The hook logs to
+  `$CLAUDE_PROJECT_DIR/.dev-suite/logs` and defaults that to `$PWD`, so running
+  the suite dropped log files into whatever directory it was invoked from — for
+  a contributor running it at a repo root, an untracked `.dev-suite/` the
+  package's own `.gitignore` cannot reach.
+
+### Changed — model currency
+
+Model pins were a generation behind. Superseded models keep serving, so nothing
+failed; runs simply stopped getting the current generation. Updated together:
+
+- `agents/code-architect.md`, `agents/code-reviewer.md`: `claude-opus-4-7` →
+  `claude-opus-5`.
+- `agents/code-explorer.md`: the bare `sonnet` alias → `claude-sonnet-5`, so all
+  three agents pin explicitly per the documented strategy rather than two
+  pinning and one drifting.
+- `SKILL.md`, `references/model-deployment.md`, `references/agent-roster.md`,
+  `references/token-budgeting.md`: routing tables, pricing, and prose.
+- `scripts/token_budget_monitor.py`: added `DEFAULT_MODEL`, extended
+  `MODEL_PRICING` with the current generation, and switched the fallback and
+  `record --model` default off the hardcoded 4.7 ID. Superseded IDs stay in the
+  table — they remain callable, and a run that pins one should still cost out
+  correctly. The `estimated_cost_usd` report keys lose their version suffixes
+  (`all_opus_4_7` → `all_opus`); nothing outside the script read them.
+- `references/token-budgeting.md` claimed Opus 5 tokenizes 1.0–1.35× heavier
+  than previous models. That figure was Opus 4.7 relative to 4.6; Opus 5 shares
+  the 4.7 tokenizer, so counts are roughly flat coming from 4.7 or 4.8 and the
+  multiplier only applies from 4.6 and older.
+- `references/model-deployment.md` gains a "Keeping Model IDs Current" section
+  listing all four places an ID lives, because the failure mode here is silent
+  and the previous migration section documented a one-time 4.6 → 4.7 move
+  rather than the recurring task.
+
+### Added
+
+- 4 hook regression tests (85 total): the real payload shape for clean, flawed
+  and missing blocks; the `hookSpecificOutput` envelope; approval emitting no
+  decision; and the `stop_hook_active` loop guard.
+
+### Notes
+
+Version 3.1.1 is packaged correctly but its gate does not work. Anyone who
+installed it should move to 3.1.2.

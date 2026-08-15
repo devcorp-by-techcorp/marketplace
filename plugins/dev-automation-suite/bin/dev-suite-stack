@@ -6,11 +6,26 @@
 set -euo pipefail
 SUITE_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 
+# Flags that consume a following token as their value. Without this, the value
+# of `--start-index 12` is mistaken for the positional project root and the
+# flag is then passed on with nothing after it.
+VALUE_FLAGS=" --start-index "
+
 target=""
 args=()
+expect_value=0
 for arg in "$@"; do
+    if (( expect_value )); then
+        args+=("$arg")
+        expect_value=0
+        continue
+    fi
     case "$arg" in
-        -*) args+=("$arg") ;;
+        -*)
+            args+=("$arg")
+            # `--flag=value` carries its own value and consumes nothing extra.
+            [[ "$VALUE_FLAGS" == *" $arg "* ]] && expect_value=1
+            ;;
         *)  [[ -z "$target" ]] && target="$arg" || args+=("$arg") ;;
     esac
 done

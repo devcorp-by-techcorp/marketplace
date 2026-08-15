@@ -15,6 +15,7 @@ scripts run.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -260,50 +261,126 @@ class TestHook(unittest.TestCase):
     HOOK = HOOKS / 'subagent-verification-gate.sh'
 
     def _run(self, payload: str) -> dict:
-        result = subprocess.run(
-            ['bash', str(self.HOOK)],
-            input=payload, capture_output=True, text=True, timeout=60,
-        )
+        # The hook logs to $CLAUDE_PROJECT_DIR/.dev-suite/logs, defaulting to
+        # $PWD. Point it at a temp dir so running the suite doesn't drop log
+        # files into whatever directory the tests were invoked from.
+        with tempfile.TemporaryDirectory() as project_dir:
+            env = {**os.environ, 'CLAUDE_PROJECT_DIR': project_dir}
+            result = subprocess.run(
+                ['bash', str(self.HOOK)],
+                input=payload, capture_output=True, text=True, timeout=60,
+                env=env,
+            )
         self.assertEqual(result.returncode, 0, 'hook must always exit 0')
         return json.loads(result.stdout)
 
-    def test_clean_block_approved(self):
-        text = (FIXTURES / 'clean-evidence-block.md').read_text()
-        out = self._run(json.dumps({'agent': 'a', 'output': text}))
-        self.assertEqual(out['decision'], 'approve')
+    @staticmethod
+    def _decision(out: dict):
+        """The decision, from either the nested envelope or the legacy top level.
 
-    def test_flawed_block_blocked(self):
+        Returns None when no decision was emitted, which is how an approval is
+        expressed: SubagentStop defines only "block", so letting the subagent
+        stop means saying nothing at all.
+        """
+        nested = (out.get('hookSpecificOutput') or {}).get('decision')
+        return nested or out.get('decision')
+
+    @staticmethod
+    def _subagent_stop_payload(message: str, **overrides) -> str:
+        """A payload with the field names SubagentStop actually sends.
+
+        The suite once read `output`/`response`/`text`, none of which exist on
+        this event, so the gate never saw agent output and blocked everything.
+        Every new hook test must go through this builder rather than inventing
+        a shape, so the tests cannot drift off the real contract again.
+        """
+        payload = {
+            'session_id': 'sess-1',
+            'prompt_id': 'prompt-1',
+            'transcript_path': '/home/u/.claude/projects/p/sess-1.jsonl',
+            'cwd': '/home/u/proj',
+            'permission_mode': 'default',
+            'hook_event_name': 'SubagentStop',
+            'agent_id': 'agent-1',
+            'agent_type': 'code-reviewer',
+            'last_assistant_message': message,
+            'stop_hook_active': False,
+        }
+        payload.update(overrides)
+        return json.dumps(payload)
+
+    # -- the real runtime contract -----------------------------------------
+
+    def test_real_payload_clean_block_approved(self):
+        """A clean block in `last_assistant_message` must be seen and approved."""
+        text = (FIXTURES / 'clean-evidence-block.md').read_text()
+        out = self._run(self._subagent_stop_payload(text))
+        self.assertIsNone(self._decision(out))
+
+    def test_real_payload_flawed_block_blocked(self):
         text = (FIXTURES / 'flawed-evidence-block.md').read_text()
-        out = self._run(json.dumps({'agent': 'a', 'output': text}))
-        self.assertEqual(out['decision'], 'block')
+        out = self._run(self._subagent_stop_payload(text))
+        self.assertEqual(self._decision(out), 'block')
+
+    def test_real_payload_missing_block_blocked(self):
+        out = self._run(self._subagent_stop_payload('All done, looks good.'))
+        self.assertEqual(self._decision(out), 'block')
+
+    def test_block_uses_hook_specific_output_envelope(self):
+        """A block must be emitted where SubagentStop actually reads it."""
+        text = (FIXTURES / 'flawed-evidence-block.md').read_text()
+        out = self._run(self._subagent_stop_payload(text))
+        envelope = out.get('hookSpecificOutput')
+        self.assertIsInstance(envelope, dict, 'block needs hookSpecificOutput')
+        self.assertEqual(envelope.get('hookEventName'), 'SubagentStop')
+        self.assertEqual(envelope.get('decision'), 'block')
+
+    def test_approval_emits_no_decision_value(self):
+        """There is no "approve" value in the contract; absence is approval."""
+        text = (FIXTURES / 'clean-evidence-block.md').read_text()
+        out = self._run(self._subagent_stop_payload(text))
+        self.assertNotIn('decision', out)
+        self.assertNotIn('hookSpecificOutput', out)
+
+    def test_stop_hook_active_breaks_the_loop(self):
+        """Blocking while a stop hook is already active is how loops start."""
+        text = (FIXTURES / 'flawed-evidence-block.md').read_text()
+        out = self._run(
+            self._subagent_stop_payload(text, stop_hook_active=True)
+        )
+        self.assertIsNone(self._decision(out))
+
+    # -- manual / legacy invocation shapes ---------------------------------
 
     def test_colons_in_output_do_not_truncate(self):
         """The predecessor hook lost everything after the first colon."""
         text = 'Note: at 10:30 I ran: tsc\n\n' + (FIXTURES / 'clean-evidence-block.md').read_text()
-        out = self._run(json.dumps({'agent': 'a', 'output': text}))
-        self.assertEqual(out['decision'], 'approve')
+        out = self._run(self._subagent_stop_payload(text))
+        self.assertIsNone(self._decision(out))
 
     def test_raw_non_json_payload(self):
         text = (FIXTURES / 'clean-evidence-block.md').read_text()
         out = self._run(text)
-        self.assertEqual(out['decision'], 'approve')
+        self.assertIsNone(self._decision(out))
+
+    def test_legacy_output_key_still_accepted(self):
+        """Kept for hand-driven invocation; must not be the only shape that works."""
+        text = (FIXTURES / 'clean-evidence-block.md').read_text()
+        out = self._run(json.dumps({'agent': 'a', 'output': text}))
+        self.assertIsNone(self._decision(out))
 
     def test_content_block_list_payload(self):
         text = (FIXTURES / 'clean-evidence-block.md').read_text()
         out = self._run(json.dumps({'output': [{'type': 'text', 'text': text}]}))
-        self.assertEqual(out['decision'], 'approve')
-
-    def test_missing_block_blocked(self):
-        out = self._run(json.dumps({'agent': 'a', 'output': 'All done, looks good.'}))
-        self.assertEqual(out['decision'], 'block')
+        self.assertIsNone(self._decision(out))
 
     def test_empty_payload_approved(self):
         out = self._run('')
-        self.assertEqual(out['decision'], 'approve')
+        self.assertIsNone(self._decision(out))
 
     def test_no_aggregate_score_in_hook_output(self):
         text = (FIXTURES / 'flawed-evidence-block.md').read_text()
-        out = self._run(json.dumps({'agent': 'a', 'output': text}))
+        out = self._run(self._subagent_stop_payload(text))
         self.assertNotIn('scores', out)
         self.assertNotIn('overall', json.dumps(out).lower().replace('overall:', ''))
 

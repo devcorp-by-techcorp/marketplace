@@ -8,17 +8,37 @@ all subagents via `hooks/hooks.json`.
 **Flow**: agent finishes → hook reads payload → extracts the verification block
 → delegates to `scripts/verification_gate.py` → emits an approve/block decision.
 
-**Payload handling.** Accepts JSON (`output`, `response`, `text`, `content`,
-`message`, `result` keys, including content-block list form) and raw text. The
-full payload is read; nothing is truncated. Agent output legitimately contains
-colons, pipes, and newlines.
+**Payload handling.** SubagentStop delivers the agent's final text in
+**`last_assistant_message`**. That is the field to read; there is no `output` or
+`response` key on this event. The hook also accepts `output`, `response`,
+`text`, `content`, `message`, `result` (including content-block list form) and
+raw text, but only so hand-driven invocation and fixtures keep working — the
+runtime field is tried first. The full payload is read; nothing is truncated.
+Agent output legitimately contains colons, pipes, and newlines.
 
-**Decision object**:
+Fields consumed:
+
+| Field | Use |
+|---|---|
+| `last_assistant_message` | the agent's final text — the thing being judged |
+| `stop_hook_active` | true when a stop hook is already driving the session; the gate approves immediately rather than blocking into a loop |
+
+**Decision object.** A block goes in the `hookSpecificOutput` envelope, which is
+where SubagentStop reads it. The top-level `decision` is retained alongside it
+for older CLI builds:
 
 ```json
-{ "decision": "block", "reason": "Blocked by verification gate — see per-item report",
+{ "hookSpecificOutput": { "hookEventName": "SubagentStop", "decision": "block",
+    "reason": "Blocked by verification gate — see per-item report" },
+  "decision": "block",
+  "reason": "Blocked by verification gate — see per-item report",
   "report": "…full per-item output…" }
 ```
+
+`"block"` is the **only** value the field defines. An approval emits no
+decision key at all — absence of a block is what lets the subagent stop. Never
+emit `"decision": "approve"`; it is not in the contract and behaves the same as
+sending nonsense.
 
 No `scores` object and no aggregate value, by design.
 
@@ -67,10 +87,18 @@ All four are covered by regression tests in `tests/test_suite.py::TestHook`.
 ```bash
 python3 tests/test_suite.py -k TestHook
 
-# Manual single case
-python3 -c "import json;print(json.dumps({'output':open('tests/fixtures/flawed-evidence-block.md').read()}))" \
+# Manual single case, in the shape the runtime actually sends
+python3 -c "import json;print(json.dumps({'hook_event_name':'SubagentStop','stop_hook_active':False,'last_assistant_message':open('tests/fixtures/flawed-evidence-block.md').read()}))" \
   | bash hooks/subagent-verification-gate.sh
 ```
 
-Seven payload shapes are covered: clean block, flawed block, colon-heavy text,
-raw non-JSON, content-block list, missing block, and empty payload.
+New hook tests must build their payload with
+`TestHook._subagent_stop_payload()` rather than hand-rolling a dict. The suite
+previously tested seven payload shapes, none of which was the one SubagentStop
+sends — so the gate blocked every delivery in production while all tests passed.
+The builder exists to make that failure mode unrepeatable.
+
+Covered: the real SubagentStop payload (clean, flawed, and missing block), the
+`hookSpecificOutput` envelope shape, approval emitting no decision, the
+`stop_hook_active` loop guard, plus colon-heavy text, raw non-JSON, legacy
+`output` key, content-block list, and empty payload.

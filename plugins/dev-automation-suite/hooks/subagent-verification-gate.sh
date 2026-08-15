@@ -24,6 +24,18 @@
 # Contract: reads the hook payload as JSON on stdin, writes a decision object
 # to stdout. Exits 0 always — the decision travels in the payload, so a hook
 # problem never silently blocks legitimate work.
+#
+# SubagentStop payload fields this relies on:
+#   last_assistant_message — the agent's final text. THIS is where the output
+#                            lives; there is no `output`/`response` key. Reading
+#                            the wrong field makes every delivery unparseable,
+#                            which fails closed and blocks everything.
+#   stop_hook_active       — true when a stop hook is already driving the
+#                            session; blocking again from there loops.
+#
+# Decision object: a block is emitted as
+#   {"hookSpecificOutput": {"hookEventName": "SubagentStop", "decision": "block"}}
+# "block" is the only defined value. An approval emits NO decision key.
 # =============================================================================
 
 set -uo pipefail
@@ -47,12 +59,25 @@ log() {
 }
 
 emit() {
-    # $1 decision, $2 reason, $3 optional detail file
+    # $1 decision (block|approve), $2 reason, $3 optional detail file
     local decision="$1" reason="$2" detail_file="${3:-}"
     "$PYTHON_BIN" - "$decision" "$reason" "$detail_file" <<'PYEOF'
 import json, sys
 decision, reason, detail_file = sys.argv[1], sys.argv[2], sys.argv[3]
-payload = {"decision": decision, "reason": reason}
+payload = {"reason": reason}
+if decision == "block":
+    # "block" is the only value SubagentStop defines. hookSpecificOutput is the
+    # documented surface; the top-level key is retained for older CLI builds
+    # that read the decision there.
+    payload["hookSpecificOutput"] = {
+        "hookEventName": "SubagentStop",
+        "decision": "block",
+        "reason": reason,
+    }
+    payload["decision"] = "block"
+# Approval emits no decision at all — the absence of a block is what lets the
+# subagent stop normally. There is no "approve" value in the contract, and
+# sending one is indistinguishable from sending garbage.
 if detail_file:
     try:
         with open(detail_file, encoding="utf-8", errors="replace") as handle:
@@ -85,7 +110,8 @@ fi
 
 BLOCK_FILE="$(mktemp)"
 REPORT_FILE="$(mktemp)"
-trap 'rm -f "$BLOCK_FILE" "$REPORT_FILE"' EXIT
+META_FILE="$(mktemp)"
+trap 'rm -f "$BLOCK_FILE" "$REPORT_FILE" "$META_FILE"' EXIT
 
 # ---------------------------------------------------------------------------
 # Extract the agent's text from the payload using a real JSON parser, then
@@ -96,12 +122,12 @@ trap 'rm -f "$BLOCK_FILE" "$REPORT_FILE"' EXIT
 # stdin for the program text, so a piped payload would be silently empty.
 PAYLOAD_FILE="$(mktemp)"
 printf '%s' "$PAYLOAD" > "$PAYLOAD_FILE"
-trap 'rm -f "$BLOCK_FILE" "$REPORT_FILE" "$PAYLOAD_FILE"' EXIT
+trap 'rm -f "$BLOCK_FILE" "$REPORT_FILE" "$META_FILE" "$PAYLOAD_FILE"' EXIT
 
-if ! "$PYTHON_BIN" - "$BLOCK_FILE" "$PAYLOAD_FILE" <<'PYEOF'
+if ! "$PYTHON_BIN" - "$BLOCK_FILE" "$PAYLOAD_FILE" "$META_FILE" <<'PYEOF'
 import json, re, sys
 
-out_path, payload_path = sys.argv[1], sys.argv[2]
+out_path, payload_path, meta_path = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(payload_path, encoding="utf-8", errors="replace") as handle:
     raw = handle.read()
 
@@ -111,8 +137,25 @@ try:
 except json.JSONDecodeError:
     data = None
 
+# `stop_hook_active` is true when a stop hook is already driving the session.
+# Blocking again from here is how a stop hook turns into an infinite loop.
+if isinstance(data, dict) and data.get("stop_hook_active") is True:
+    with open(meta_path, "w", encoding="utf-8") as handle:
+        handle.write("stop_hook_active\n")
+
 if isinstance(data, dict):
-    for key in ("output", "response", "text", "content", "message", "result"):
+    # SubagentStop carries the agent's final text in `last_assistant_message`.
+    # The remaining keys are accepted so the hook still works when driven by
+    # hand or by tests, but the real runtime field must be tried first.
+    for key in (
+        "last_assistant_message",
+        "output",
+        "response",
+        "text",
+        "content",
+        "message",
+        "result",
+    ):
         value = data.get(key)
         if isinstance(value, str) and value.strip():
             text = value
@@ -142,6 +185,16 @@ PYEOF
 then
     log ERROR "failed to extract agent text from payload"
     emit approve "Could not parse hook payload — not blocking"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Loop guard. If a stop hook is already active, this gate has already had its
+# say once; blocking a second time is what produces a non-terminating loop.
+# ---------------------------------------------------------------------------
+if [[ -s "$META_FILE" ]]; then
+    log INFO "stop_hook_active set; approving to break the stop loop"
+    emit approve "A stop hook is already active — not blocking again"
     exit 0
 fi
 
