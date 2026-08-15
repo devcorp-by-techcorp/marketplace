@@ -69,6 +69,10 @@ class PhaseSpec:
     scripts: tuple[str, ...] = ()
     agent_led: bool = False
     requires_verification_block: bool = False
+    #: True when the phase's agent reviews someone else's work. Such a phase
+    #: needs a packet carrying the original task and the completed work and
+    #: nothing else — see references/independent-review.md.
+    requires_review_packet: bool = False
 
 
 PHASES: dict[int, PhaseSpec] = {
@@ -82,7 +86,8 @@ PHASES: dict[int, PhaseSpec] = {
     3: PhaseSpec(3, 'review', 'Automated review, compatibility and preservation checks',
                  scripts=('code_review', 'breaking_changes', 'compatibility',
                           'preservation'),
-                 agent_led=True, requires_verification_block=True),
+                 agent_led=True, requires_verification_block=True,
+                 requires_review_packet=True),
     4: PhaseSpec(4, 'test', 'Test execution', scripts=('orchestrator',)),
     5: PhaseSpec(5, 'fix', 'Root-cause fixes with band-aid rejection',
                  scripts=('fix_validator',), agent_led=True,
@@ -92,7 +97,8 @@ PHASES: dict[int, PhaseSpec] = {
     7: PhaseSpec(7, 'validate', 'Full quality gate',
                  scripts=('code_review', 'breaking_changes', 'compatibility',
                           'preservation', 'self_assessment'),
-                 agent_led=True, requires_verification_block=True),
+                 agent_led=True, requires_verification_block=True,
+                 requires_review_packet=True),
     8: PhaseSpec(8, 'harden', 'Security hardening pass',
                  scripts=('deployment_readiness',), agent_led=True),
     9: PhaseSpec(9, 'observe', 'Observability and performance pass', agent_led=True),
@@ -196,6 +202,7 @@ def run_phase(
     targets: Optional[list[str]] = None,
     original: Optional[str] = None,
     verification_block: Optional[str] = None,
+    review_packet: Optional[str] = None,
     stack: str = '',
 ) -> PhaseResult:
     """Run every script a phase owns, plus its verification gate if applicable."""
@@ -235,6 +242,26 @@ def run_phase(
             kwargs = {'project_root': project_root, 'subcommand': 'list'}
 
         result.checks.append(run_script(script, **kwargs))
+
+    if spec.requires_review_packet:
+        if review_packet:
+            packet_check = registry.get('review_packet')
+            result.checks.append(run_script(
+                packet_check, target=review_packet, project_root=project_root))
+        else:
+            result.checks.append(CheckResult(
+                script='review_packet', verdict=HALT,
+                skipped_reason=(
+                    f'phase {phase} ({spec.name}) reviews work the reviewer did '
+                    'not do, and no review packet was supplied. A reviewer '
+                    "handed the author's reasoning is not reviewing "
+                    'independently — it is agreeing with an argument.'
+                ),
+                detail=(
+                    'build one: review_packet.py build <root> --diff <f> -o <packet>, '
+                    'then pass --review-packet <packet>'
+                ),
+            ))
 
     if spec.requires_verification_block:
         if verification_block:
@@ -327,6 +354,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         targets=args.targets,
         original=args.original,
         verification_block=args.verification_block,
+        review_packet=args.review_packet,
         stack=args.stack,
     )
 
@@ -358,6 +386,8 @@ def cmd_phases(_args: argparse.Namespace) -> int:
             flags.append('agent-led')
         if spec.requires_verification_block:
             flags.append('gate required')
+        if spec.requires_review_packet:
+            flags.append('blind review')
         flag_text = f'  [{", ".join(flags)}]' if flags else ''
         print(f'{spec.number:>2}  {spec.name:<11}{spec.purpose}{flag_text}')
         print(f'    scripts: {scripts}')
@@ -378,6 +408,11 @@ def main() -> None:
     run_parser.add_argument(
         '--verification-block',
         help='File containing the agent pre-output verification block',
+    )
+    run_parser.add_argument(
+        '--review-packet',
+        help=('File containing the review packet: the original task and the '
+              'completed work, and nothing about how the work was produced'),
     )
     run_parser.add_argument('--stack', default='', help='Stack profile name')
     run_parser.add_argument('--json', action='store_true', help='Emit JSON')

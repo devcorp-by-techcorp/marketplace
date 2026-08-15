@@ -33,6 +33,7 @@ import stack_profile  # noqa: E402
 import ground_file  # noqa: E402
 import work_items  # noqa: E402
 import verification_gate as gate  # noqa: E402
+import review_packet  # noqa: E402
 
 
 def run_gate(text: str, **kwargs) -> gate.GateReport:
@@ -794,6 +795,253 @@ class TestMarketplaceManifest(unittest.TestCase):
                 seen.add(current)
                 self.assertIn(current, renames, f'{current} terminates nowhere')
                 current = renames[current]
+
+
+class TestReviewPacket(unittest.TestCase):
+    """A reviewer that reads the author's account is not reviewing."""
+
+    TASK = 'Uploads are timing out for some users.'
+    DIFF = ('--- a/upload.py\n+++ b/upload.py\n@@\n'
+            '+MAX_RETRIES = 3\n+def upload(f): ...\n')
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.record = review_packet.record_task(str(self.root), self.TASK)
+
+    def _packet(self, **overrides):
+        return review_packet.build_packet(
+            overrides.get('record', self.record), overrides.get('work', self.DIFF))
+
+    # -- the clean path ----------------------------------------------------
+
+    def test_built_packet_is_clean(self):
+        self.assertEqual(review_packet.check_packet(self._packet(), self.record), [])
+
+    def test_packet_contains_task_and_work_only(self):
+        headings = [h for _, h in review_packet.headings(self._packet().splitlines())]
+        self.assertEqual(headings, ['## Task', '## Work'])
+
+    # -- the task is quoted, not restated ----------------------------------
+
+    def test_restated_task_is_caught(self):
+        """The framing failure this module exists for: an orchestrator that
+        compresses the request into an already-decided sentence."""
+        leading = self._packet().replace(
+            self.TASK, 'Review the retry logic added to fix the upload race.')
+        rules = {f.rule for f in review_packet.check_packet(leading, self.record)}
+        self.assertIn('task_tampering', rules)
+
+    def test_self_consistent_paraphrase_is_still_caught(self):
+        """The realistic attack, and the one the header alone misses.
+
+        An orchestrator that builds its own packet computes a correct hash of
+        its own paraphrase, so the packet is internally consistent. Only the
+        comparison against the task recorded before work began catches it.
+        """
+        forged = dict(self.record)
+        forged['task'] = 'Review the retry logic added to fix the upload race.'
+        forged['sha256'] = review_packet.sha256(forged['task'])
+        packet = review_packet.build_packet(forged, self.DIFF)
+
+        self.assertEqual(review_packet.check_packet(packet), [],
+                         'internally consistent — the header check cannot see this')
+        rules = {f.rule for f in review_packet.check_packet(packet, self.record)}
+        self.assertIn('task_tampering', rules)
+
+    def test_task_edit_is_caught_without_the_recorded_original(self):
+        """A packet from elsewhere is still checkable: the header pins the hash."""
+        edited = self._packet().replace(self.TASK, 'Fix the upload race condition.')
+        rules = {f.rule for f in review_packet.check_packet(edited)}
+        self.assertIn('task_tampering', rules)
+
+    def test_recording_a_different_task_is_refused(self):
+        """A task re-recorded mid-work is the author's summary of what they built."""
+        with self.assertRaises(ValueError):
+            review_packet.record_task(str(self.root), 'Add retry logic to uploads.')
+
+    def test_recording_the_same_task_is_idempotent(self):
+        again = review_packet.record_task(str(self.root), self.TASK)
+        self.assertEqual(again['sha256'], self.record['sha256'])
+
+    # -- prose contamination ----------------------------------------------
+
+    def test_author_narrative_is_caught(self):
+        packet = self._packet() + '\nI chose exponential backoff for this.\n'
+        rules = {f.rule for f in review_packet.check_packet(packet, self.record)}
+        self.assertIn('author_narrative', rules)
+
+    def test_self_assessment_is_caught(self):
+        packet = self._packet() + '\nAll tests pass, ready for merge.\n'
+        rules = {f.rule for f in review_packet.check_packet(packet, self.record)}
+        self.assertIn('self_assessment', rules)
+
+    def test_authors_verification_block_is_caught(self):
+        packet = self._packet() + '\n## Pre-Output Verification\n\nchecked\n'
+        rules = {f.rule for f in review_packet.check_packet(packet, self.record)}
+        self.assertIn('verification_block', rules)
+
+    def test_process_reference_is_caught(self):
+        packet = self._packet() + '\nSee .dev-suite/logs/session.log for context.\n'
+        rules = {f.rule for f in review_packet.check_packet(packet, self.record)}
+        self.assertIn('process_reference', rules)
+
+    def test_extra_section_is_caught(self):
+        packet = self._packet() + '\n## Notes for the reviewer\n\ncontext\n'
+        rules = {f.rule for f in review_packet.check_packet(packet, self.record)}
+        self.assertIn('extra_section', rules)
+
+    # -- the checker must not eat correct packets --------------------------
+
+    def test_narrative_shaped_code_is_not_flagged(self):
+        """The diff is the artifact. Scanning it for words *about* the artifact
+        is how a checker like this starts rejecting correct packets."""
+        noisy = ('--- a/x.py\n+++ b/x.py\n@@\n'
+                 '+# I decided on a token bucket; all tests pass.\n'
+                 '+STATUS = "OBSERVED"\n'
+                 '+def my_approach(): ...\n')
+        packet = review_packet.build_packet(self.record, noisy)
+        self.assertEqual(review_packet.check_packet(packet, self.record), [])
+
+    def test_build_refuses_work_carrying_narrative_outside_the_fence(self):
+        with self.assertRaises(ValueError):
+            review_packet.build_packet(self.record, '   ')
+
+    def test_missing_section_is_caught(self):
+        rules = {f.rule for f in review_packet.check_packet('## Task\n\nsomething\n')}
+        self.assertIn('missing_section', rules)
+
+    def test_no_recorded_task_is_an_explicit_failure(self):
+        with self.assertRaises(FileNotFoundError):
+            review_packet.load_task(str(Path(tempfile.mkdtemp())))
+
+
+class TestReviewerIsolation(unittest.TestCase):
+    """The packet controls what the reviewer is handed; this controls what it
+    can reach. A reviewer given a clean packet that can open the author's
+    session log has been handed nothing and told everything."""
+
+    HOOK = HOOKS / 'reviewer-isolation.sh'
+
+    def _run(self, payload: dict) -> dict:
+        result = subprocess.run(
+            ['bash', str(self.HOOK)], input=json.dumps(payload),
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout) if result.stdout.strip() else {}
+
+    def _decision(self, payload: dict) -> str:
+        out = self._run(payload)
+        return out.get('hookSpecificOutput', {}).get('permissionDecision', 'allow')
+
+    def _pre(self, tool: str, tool_input: dict, agent='dev-automation-suite:code-reviewer'):
+        return {'hook_event_name': 'PreToolUse', 'agent_type': agent,
+                'tool_name': tool, 'tool_input': tool_input}
+
+    def test_reviewer_cannot_read_suite_state(self):
+        self.assertEqual(
+            self._decision(self._pre('Read', {'file_path': '/p/.dev-suite/logs/a.log'})),
+            'deny')
+
+    def test_reviewer_cannot_read_an_agent_transcript(self):
+        self.assertEqual(
+            self._decision(self._pre(
+                'Read', {'file_path': '/home/u/.claude/projects/x/subagents/a.jsonl'})),
+            'deny')
+
+    def test_reviewer_cannot_shell_into_the_process_record(self):
+        self.assertEqual(
+            self._decision(self._pre('Bash', {'command': 'cat .dev-suite/logs/*.log'})),
+            'deny')
+
+    def test_reviewer_keeps_the_codebase(self):
+        """Reviewing a diff means reading the code around it."""
+        self.assertEqual(
+            self._decision(self._pre('Read', {'file_path': '/p/src/upload.py'})),
+            'allow')
+
+    def test_reviewer_keeps_a_shell_for_tests(self):
+        self.assertEqual(
+            self._decision(self._pre('Bash', {'command': 'python3 -m pytest tests/'})),
+            'allow')
+
+    def test_windows_separators_do_not_bypass_the_denylist(self):
+        """A forward-slash rule never matches a backslash path, and the call
+        proceeds as though the hook had not run."""
+        self.assertEqual(
+            self._decision(self._pre(
+                'Read', {'file_path': 'C:\\proj\\.dev-suite\\logs\\a.log'})),
+            'deny')
+
+    def test_other_agents_are_untouched(self):
+        self.assertEqual(
+            self._decision(self._pre(
+                'Read', {'file_path': '/p/.dev-suite/logs/a.log'}, agent='Explore')),
+            'allow')
+
+    def test_contract_is_injected_at_spawn(self):
+        """So the contract does not depend on the orchestrator including it."""
+        out = self._run({'hook_event_name': 'SubagentStart',
+                         'agent_type': 'dev-automation-suite:code-reviewer',
+                         'agent_id': 'a1'})
+        context = out['hookSpecificOutput']['additionalContext']
+        self.assertIn('independently', context)
+        self.assertIn('report the contamination', context)
+
+    def test_malformed_payload_does_not_wedge_the_session(self):
+        result = subprocess.run(
+            ['bash', str(self.HOOK)], input='not json',
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0)
+
+
+class TestBlindReviewWiring(unittest.TestCase):
+    """The two phases where one agent judges another's output."""
+
+    def setUp(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import suite_orchestrator
+        self.orch = suite_orchestrator
+
+    def test_review_and_validate_require_a_packet(self):
+        for phase in (3, 7):
+            with self.subTest(phase=phase):
+                self.assertTrue(self.orch.PHASES[phase].requires_review_packet)
+
+    def test_producing_phases_do_not(self):
+        """Build and Fix are agent-led but not reviewing — the agent is
+        producing work, not judging someone else's."""
+        for phase in (2, 5):
+            with self.subTest(phase=phase):
+                self.assertFalse(self.orch.PHASES[phase].requires_review_packet)
+
+    def test_missing_packet_halts_the_phase(self):
+        result = self.orch.run_phase(3, project_root=tempfile.mkdtemp())
+        packet_checks = [c for c in result.checks if c.script == 'review_packet']
+        self.assertEqual(len(packet_checks), 1)
+        self.assertEqual(packet_checks[0].verdict, 'HALT')
+
+    def test_contaminated_packet_halts_rather_than_routing_to_fix(self):
+        """There is nothing to fix in the code — the review was never conducted
+        under the conditions it claims."""
+        spec = registry.get('review_packet')
+        self.assertTrue(spec.halts_on_fail)
+        self.assertEqual(spec.interpret_exit(1), 'HALT')
+
+    def test_reviewer_has_no_tool_that_reads_another_agent_s_output(self):
+        import re
+        text = (SUITE_ROOT / 'agents' / 'code-reviewer.md').read_text()
+        tools = re.search(r'(?m)^tools:\s*(.+)$', text).group(1)
+        for forbidden in ('BashOutput', 'KillShell'):
+            self.assertNotIn(forbidden, tools)
+
+    def test_workflow_ships_and_declares_its_name(self):
+        workflow = SUITE_ROOT / 'workflows' / 'independent-review.js'
+        self.assertTrue(workflow.is_file())
+        source = workflow.read_text()
+        self.assertIn("name: 'independent-review'", source)
+        self.assertNotIn('import(', source,
+                         'the workflow runtime rejects a script containing import()')
 
 
 if __name__ == '__main__':

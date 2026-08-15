@@ -4,6 +4,80 @@ All notable changes to the dev-automation-suite.
 
 Format follows Keep a Changelog. Versioning is semantic.
 
+## [3.3.0] — 2026-08-15
+
+Review and validation are now performed by an agent that never sees how the
+work was produced.
+
+### The problem
+
+Delegating review to a separate agent looks like independence — different
+context window, clean start. But the reviewer's prompt is written by an
+orchestrator that has been inside the problem for twenty turns, and that
+orchestrator does not leak the reasoning by being careless. It leaks by being
+helpful: *"review the retry logic I added around the timeout — I used
+exponential backoff because the fixed delay was hammering the upstream, tests
+pass."* Every clause is true and disqualifying. The reviewer will check whether
+backoff was implemented correctly. It will not ask whether retrying was the
+right response at all — the question the framing quietly closed.
+
+Telling the reviewer to be objective does not touch this. The information is
+already in its context window.
+
+### Added
+
+- **`scripts/review_packet.py`** — `record` pins the original task before work
+  starts, `build` assembles a packet from that pinned task plus a diff, `check`
+  verifies any packet carries nothing else. `check` is separate from `build`
+  because a hand-assembled packet still has to be checkable; enforcement that
+  only works when you used the right tool is not enforcement.
+
+  Seven named rules: `extra_section`, `missing_section`, `task_tampering`,
+  `author_narrative`, `verification_block`, `self_assessment`,
+  `process_reference`. Prose rules match only outside code fences — a diff
+  legitimately contains `I` in a string literal and `PASS` in a test name, and
+  a checker that flags the artifact for words about the artifact gets switched
+  off within a week.
+
+- **`hooks/reviewer-isolation.sh`** — on `PreToolUse`, denies the reviewer any
+  read into `.dev-suite/`, session logs, agent transcripts, and `.jsonl`, by
+  path and by shell command. A reviewer handed a clean packet that can then
+  open the author's session log has been handed nothing and told everything.
+  The codebase stays fully readable: reviewing a diff means reading the code
+  around it. On `SubagentStart`, injects the blind-review contract, so it does
+  not depend on the orchestrator remembering to include it.
+
+- **`workflows/independent-review.js`** — the structural layer. A workflow
+  holds orchestration in a script, so intermediate results live in script
+  variables rather than a context window: the reviewer prompts are built from
+  `task` and `diff`, and no variable holding the author's account exists for
+  them to be built from. Runs reviewers in parallel without showing them each
+  other's findings, and halts the whole run if any reviewer reports
+  contamination — a framed reviewer does not become independent because two
+  others agreed with it.
+
+- **`references/independent-review.md`** — why the task is pinned by hash, what
+  each of the four layers covers, and which phases this does not apply to.
+
+### Changed
+
+- **Phases 3 and 7 require `--review-packet`** and halt without a clean one.
+  Phases 2 and 5 are agent-led but *produce* work rather than judge it, so they
+  keep the verification-block requirement and take no packet.
+- **`code-reviewer`** carries the blind-review contract, and loses `BashOutput`
+  and `KillShell` — both read another agent's output.
+- The reviewer's own verification block now explicitly covers *its review*, not
+  the author's work. "The author says the tests pass" is not evidence it has.
+
+### Tests
+
+89 → 120. Beyond the rules themselves: that a *self-consistent* paraphrase is
+caught (an orchestrator building its own packet computes a correct hash of its
+own wording, so only the comparison against the recorded original sees it);
+that narrative-shaped code inside the diff is not flagged; that the reviewer
+keeps the codebase and a shell while losing the process record; and that
+Windows separators do not slip past the denylist.
+
 ## [3.2.0] — 2026-08-15
 
 Readiness pass for terminal use. The package was structurally sound but did
