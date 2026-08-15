@@ -301,6 +301,41 @@ class TestHook(unittest.TestCase):
         out = self._run('')
         self.assertEqual(out['decision'], 'approve')
 
+    def test_real_subagent_stop_payload_is_read(self):
+        """`last_assistant_message` is the field Claude Code actually sends.
+
+        Reading only the synthetic keys made the hook fall through to the raw
+        JSON, where the block's headings are escaped text and never match — so
+        a perfectly clean delivery was blocked in every real session.
+        """
+        text = (FIXTURES / 'clean-evidence-block.md').read_text()
+        out = self._run(json.dumps({
+            'hook_event_name': 'SubagentStop',
+            'stop_hook_active': False,
+            'agent_type': 'dev-automation-suite:code-reviewer',
+            'last_assistant_message': text,
+        }))
+        self.assertEqual(out['decision'], 'approve')
+
+    def test_real_payload_with_flawed_block_still_blocks(self):
+        text = (FIXTURES / 'flawed-evidence-block.md').read_text()
+        out = self._run(json.dumps({
+            'hook_event_name': 'SubagentStop',
+            'last_assistant_message': text,
+        }))
+        self.assertEqual(out['decision'], 'block')
+
+    def test_stop_hook_active_never_blocks_twice(self):
+        """Claude Code allows 8 consecutive blocks; a subagent that cannot emit
+        a block should cost one round, not eight."""
+        out = self._run(json.dumps({
+            'hook_event_name': 'SubagentStop',
+            'stop_hook_active': True,
+            'agent_type': 'Explore',
+            'last_assistant_message': 'All done, looks good.',
+        }))
+        self.assertEqual(out['decision'], 'approve')
+
     def test_no_aggregate_score_in_hook_output(self):
         text = (FIXTURES / 'flawed-evidence-block.md').read_text()
         out = self._run(json.dumps({'agent': 'a', 'output': text}))
@@ -354,6 +389,45 @@ class TestPluginManifest(unittest.TestCase):
         hooks = json.loads((SUITE_ROOT / 'hooks' / 'hooks.json').read_text())
         command = hooks['hooks']['SubagentStop'][0]['hooks'][0]['command']
         self.assertIn('"${CLAUDE_PLUGIN_ROOT}"', command)
+
+    def test_hook_matcher_scopes_to_this_plugin_s_agents(self):
+        """SubagentStop matches on agent_type, and `*` matches every one of them.
+
+        The gate demands a verification block the built-in agents know nothing
+        about, so an unscoped matcher blocks Explore and general-purpose in
+        every session the plugin is enabled for — the plugin's own contract
+        applied to agents that never agreed to it.
+        """
+        import re
+        hooks = json.loads((SUITE_ROOT / 'hooks' / 'hooks.json').read_text())
+        matcher = hooks['hooks']['SubagentStop'][0]['matcher']
+        self.assertNotEqual(matcher, '*')
+        pattern = re.compile(matcher)
+        for agent in ('code-explorer', 'code-architect', 'code-reviewer'):
+            for name in (agent, f'dev-automation-suite:{agent}'):
+                self.assertTrue(pattern.search(name), name)
+        for outsider in ('Explore', 'Plan', 'general-purpose', 'statusline-setup'):
+            self.assertFalse(pattern.search(outsider), outsider)
+
+    def test_hook_matcher_covers_every_bundled_agent(self):
+        """An agent added to agents/ but not the matcher is silently ungated."""
+        import re
+        hooks = json.loads((SUITE_ROOT / 'hooks' / 'hooks.json').read_text())
+        pattern = re.compile(hooks['hooks']['SubagentStop'][0]['matcher'])
+        for agent in (SUITE_ROOT / 'agents').glob('*.md'):
+            name = re.search(r'(?m)^name:\s*(\S+)', agent.read_text()).group(1)
+            with self.subTest(agent=name):
+                self.assertTrue(pattern.search(f'dev-automation-suite:{name}'), name)
+
+    def test_agent_models_are_pinned_not_aliased(self):
+        """`opus`/`sonnet` re-point on release, changing a gate's behaviour
+        without changing a line of this package."""
+        import re
+        for agent in (SUITE_ROOT / 'agents').glob('*.md'):
+            model = re.search(r'(?m)^model:\s*(\S+)', agent.read_text()).group(1)
+            with self.subTest(agent=agent.name):
+                self.assertNotIn(model, {'opus', 'sonnet', 'haiku'})
+                self.assertRegex(model, r'^claude-[a-z]+-\d')
 
     def test_hook_script_is_executable(self):
         import os
@@ -612,10 +686,26 @@ class TestWorkItems(unittest.TestCase):
         self.assertIn('Derived', index['note'])
 
 
-class TestMarketplaceManifest(unittest.TestCase):
-    """The suite ships its own marketplace so it can be added and installed directly."""
+def _find_marketplace():
+    """Locate the catalog that lists this plugin.
 
-    MARKETPLACE = SUITE_ROOT / '.claude-plugin' / 'marketplace.json'
+    The marketplace manifest belongs at the root of the repository that hosts
+    the plugin, not inside the plugin — `source` paths in it are resolved
+    relative to its own directory, so a manifest sitting beside the plugin's
+    own files can only ever describe the plugin as `./`. Walk up to find it so
+    the suite still tests correctly when vendored under a different root.
+    """
+    for candidate in [SUITE_ROOT, *SUITE_ROOT.parents]:
+        manifest = candidate / '.claude-plugin' / 'marketplace.json'
+        if manifest.is_file():
+            return manifest
+    return None
+
+
+class TestMarketplaceManifest(unittest.TestCase):
+    """The hosting repository's catalog must point at this plugin correctly."""
+
+    MARKETPLACE = _find_marketplace()
 
     #: Names reserved for official Anthropic use. A third-party marketplace using
     #: one fails to load as registered from an untrusted source.
@@ -631,7 +721,11 @@ class TestMarketplaceManifest(unittest.TestCase):
     DESKTOP_REJECTED = {'org', 'org-provisioned', 'unknown'}
 
     def setUp(self):
+        if self.MARKETPLACE is None:
+            self.skipTest('no marketplace.json in any ancestor directory')
         self.mk = json.loads(self.MARKETPLACE.read_text())
+        self.root = self.MARKETPLACE.parent.parent
+        self.entry = next(e for e in self.mk['plugins'] if e['name'] == 'dev-automation-suite')
 
     def test_required_fields_present(self):
         for key in ('name', 'owner', 'plugins'):
@@ -659,14 +753,13 @@ class TestMarketplaceManifest(unittest.TestCase):
     def test_entry_name_matches_plugin_manifest(self):
         """A mismatch installs the plugin under a slug its own manifest disowns."""
         manifest = json.loads((SUITE_ROOT / '.claude-plugin' / 'plugin.json').read_text())
-        self.assertEqual(self.mk['plugins'][0]['name'], manifest['name'])
+        self.assertEqual(self.entry['name'], manifest['name'])
 
     def test_version_declared_in_exactly_one_place(self):
         """plugin.json silently wins, so a version in both lets a stale one mask the other."""
         manifest = json.loads((SUITE_ROOT / '.claude-plugin' / 'plugin.json').read_text())
-        entry = self.mk['plugins'][0]
         self.assertIn('version', manifest)
-        self.assertNotIn('version', entry)
+        self.assertNotIn('version', self.entry)
 
     def test_relative_sources_resolve_and_avoid_traversal(self):
         for entry in self.mk['plugins']:
@@ -674,8 +767,21 @@ class TestMarketplaceManifest(unittest.TestCase):
             if isinstance(source, str):
                 self.assertTrue(source.startswith('./'), source)
                 self.assertNotIn('..', source)
-                resolved = (SUITE_ROOT / source).resolve()
+                resolved = (self.root / source).resolve()
                 self.assertTrue(resolved.is_dir(), resolved)
+
+    def test_entry_source_points_at_this_plugin(self):
+        """A source resolving anywhere else installs an empty plugin, silently.
+
+        `./` — the plugin's own directory when the manifest sat beside it —
+        resolves to the repository root once the manifest moves there, and the
+        root holds no agents/, commands/ or SKILL.md to load.
+        """
+        self.assertEqual((self.root / self.entry['source']).resolve(), SUITE_ROOT)
+
+    def test_entry_source_holds_a_plugin_manifest(self):
+        manifest = (self.root / self.entry['source']).resolve() / '.claude-plugin' / 'plugin.json'
+        self.assertTrue(manifest.is_file(), manifest)
 
     def test_renames_entries_terminate(self):
         """Every chain must end at null or a listed plugin, with no cycles."""

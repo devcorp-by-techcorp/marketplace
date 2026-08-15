@@ -3,7 +3,7 @@
   "hooks": {
     "SubagentStop": [
       {
-        "matcher": "*",
+        "matcher": "^(dev-automation-suite:)?code-(explorer|architect|reviewer)$",
         "hooks": [
           {
             "type": "command",

@@ -9,7 +9,7 @@
     {
       "name": "dev-automation-suite",
       "displayName": "Development Automation Suite",
-      "source": "./",
+      "source": "./plugins/dev-automation-suite",
       "description": "Autonomous development across an eleven-phase lifecycle with script-enforced quality gates. Blocks unverified agent deliveries at SubagentStop, halts on breaking changes and unvalidated premises, rejects band-aid fixes, and detects the project stack instead of assuming it. Local files and CLI only — no external services.",
       "author": {
         "name": "TechCorp"

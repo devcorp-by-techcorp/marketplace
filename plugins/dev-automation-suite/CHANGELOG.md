@@ -4,6 +4,56 @@ All notable changes to the dev-automation-suite.
 
 Format follows Keep a Changelog. Versioning is semantic.
 
+## [3.2.0] — 2026-08-15
+
+Readiness pass for terminal use. The package was structurally sound but did
+not load: the manifests had been moved, the executable bits were never set in
+git, and the hook read a payload shape Claude Code does not send.
+
+### Fixed
+
+- **Plugin manifest relocated back into the plugin.** `plugin.json` had been
+  moved to the repository root, leaving `plugins/dev-automation-suite/` with
+  no manifest and the root looking like a plugin with no components. It now
+  sits at `plugins/dev-automation-suite/.claude-plugin/plugin.json`, where the
+  spec puts it.
+- **Marketplace `source` corrected.** The root manifest pointed at `./`, which
+  resolves to the repository root — an install would have produced a plugin
+  with no agents, commands, skill, or hook. It now points at
+  `./plugins/dev-automation-suite`. Two tests pin the resolution.
+- **Executable bits restored** on `bin/*` and `hooks/*.sh`. They were `100644`
+  in git from the first commit, so a fresh clone could not run the hook
+  (permission denied) or the PATH wrappers.
+- **Hook reads `last_assistant_message`.** That is the field `SubagentStop`
+  actually carries. Reading only the synthetic keys made every payload fall
+  through to the raw JSON, where a verification block's headings are escaped
+  text — so a clean, fully verified delivery was blocked in every real session.
+- **`stop_hook_active` guard added.** A subagent that cannot emit a block was
+  re-blocked up to Claude Code's limit of eight consecutive blocks. It now
+  costs one round.
+
+### Changed
+
+- **`SubagentStop` matcher scoped** from `*` to
+  `^(dev-automation-suite:)?code-(explorer|architect|reviewer)$`. The matcher
+  runs against `agent_type`, so `*` applied this plugin's verification
+  contract to `Explore`, `Plan`, and `general-purpose` — agents that never
+  agreed to it and cannot satisfy it.
+- **Model routing moved to the Claude 5 family**, by task shape rather than by
+  phase number: validation, conductor, and complex work on `claude-opus-5`;
+  discovery and report writing on `claude-sonnet-5` at `high`. Identifiers are
+  pinned rather than aliased — an alias silently re-points on the next release,
+  which changes a quality gate's behaviour without changing a line here.
+- Token-budget pricing table extended to the Claude 5 models, with the
+  estimate-until-measured caveat stated where the figures are used.
+
+### Tests
+
+81 → 89. The new cases pin the real `SubagentStop` payload shape, the
+`stop_hook_active` guard, the matcher's scope in both directions (covers this
+plugin's agents, excludes the built-ins), matcher/`agents/` drift, pinned
+model identifiers, and marketplace `source` resolution.
+
 ## [3.0.0] — 2026-08-11
 
 First release of the merged suite. Consolidates three previously separate

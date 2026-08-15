@@ -77,6 +77,26 @@ if [[ -z "${PAYLOAD//[[:space:]]/}" ]]; then
     exit 0
 fi
 
+# ---------------------------------------------------------------------------
+# `stop_hook_active` is true when Claude Code is already continuing because of
+# a stop hook. Blocking again from here re-blocks a subagent that has already
+# been told what to fix, and Claude Code only gives up after 8 consecutive
+# blocks. Approve immediately so a subagent that cannot produce a block — a
+# read-only agent, or one that does not know the contract — costs one round,
+# not eight.
+# ---------------------------------------------------------------------------
+if "$PYTHON_BIN" -c '
+import json, sys
+try:
+    sys.exit(0 if json.load(sys.stdin).get("stop_hook_active") else 1)
+except Exception:
+    sys.exit(1)
+' <<< "$PAYLOAD" 2>/dev/null; then
+    log INFO "stop_hook_active set; approving to avoid a re-block loop"
+    emit approve "Already continuing from a stop hook — not blocking again"
+    exit 0
+fi
+
 if [[ ! -f "$GATE" ]]; then
     log ERROR "verification_gate.py not found at ${GATE}"
     emit approve "Verification gate unavailable — hook misconfigured, not blocking"
@@ -112,7 +132,14 @@ except json.JSONDecodeError:
     data = None
 
 if isinstance(data, dict):
-    for key in ("output", "response", "text", "content", "message", "result"):
+    # `last_assistant_message` is the field Claude Code actually sends on
+    # SubagentStop; it holds the subagent's final response text. It leads the
+    # list because the remaining keys are synthetic shapes used by the tests
+    # and by direct invocation, and a real payload must not fall through to
+    # the raw-JSON fallback — the block would then be searched for inside an
+    # escaped JSON string, where its headings never match.
+    for key in ("last_assistant_message", "output", "response", "text",
+                "content", "message", "result"):
         value = data.get(key)
         if isinstance(value, str) and value.strip():
             text = value

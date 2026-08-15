@@ -5,8 +5,9 @@ automate-dev workflow.
 
 Initialises token budgets per phase, records usage as phases execute,
 and enforces limits to prevent runaway costs during agentic loops.
-Optimised for Claude Opus 4.7 with its 1.0-1.35x token multiplier
-over Opus 4.6.
+Budgets are estimates until a phase has run once on the models actually
+in use: tokenizers differ between model generations, so a figure carried
+over from an earlier deployment is a guess, not a measurement.
 
 Usage:
     python token_budget_monitor.py init <project_root> [--total-budget N] [--difficulty LEVEL]
@@ -26,17 +27,27 @@ from pathlib import Path
 from typing import Optional
 
 
-# Opus 4.7 pricing: $5/$25 per MTok input/output
-# Sonnet 4.6 pricing: $3/$15 per MTok input/output
+#: USD per million tokens, {input, output}. Published list prices, which are
+#: not necessarily what a given account is billed — treat cost output as an
+#: estimate and re-check these figures when a model generation changes.
+#: Aliases resolve to the current model of that tier.
 MODEL_PRICING = {
+    'claude-opus-5': {'input': 5.0, 'output': 25.0},
+    'claude-opus-4-8': {'input': 5.0, 'output': 25.0},
     'claude-opus-4-7': {'input': 5.0, 'output': 25.0},
     'claude-opus-4-6': {'input': 5.0, 'output': 25.0},
     'opus': {'input': 5.0, 'output': 25.0},
+    'claude-sonnet-5': {'input': 3.0, 'output': 15.0},
     'claude-sonnet-4-6': {'input': 3.0, 'output': 15.0},
     'sonnet': {'input': 3.0, 'output': 15.0},
     'claude-haiku-4-5': {'input': 1.0, 'output': 5.0},
     'haiku': {'input': 1.0, 'output': 5.0},
 }
+
+#: Fallback when a recorded model carries no published price. Assuming the
+#: Opus rate over-reports rather than under-reports, which is the safe
+#: direction for a budget monitor.
+DEFAULT_MODEL = 'claude-opus-5'
 
 
 # Default phase budgets (input + output combined)
@@ -153,7 +164,7 @@ def calculate_phase_budgets(total_budget: int, difficulty: str) -> dict:
 
 def calculate_cost(tokens: int, model: str, io_type: str = 'mixed') -> float:
     """Calculate approximate USD cost for tokens on a given model."""
-    pricing = MODEL_PRICING.get(model, MODEL_PRICING['claude-opus-4-7'])
+    pricing = MODEL_PRICING.get(model, MODEL_PRICING[DEFAULT_MODEL])
     if io_type == 'input':
         return (tokens / 1_000_000) * pricing['input']
     if io_type == 'output':
@@ -296,8 +307,8 @@ def cmd_init(args: argparse.Namespace) -> None:
         'difficulty': difficulty,
         'phase_budgets': phase_budgets,
         'estimated_cost_usd': {
-            'all_opus_4_7': round(calculate_cost(total_budget, 'claude-opus-4-7'), 2),
-            'all_sonnet_4_6': round(calculate_cost(total_budget, 'claude-sonnet-4-6'), 2),
+            'all_opus_5': round(calculate_cost(total_budget, 'claude-opus-5'), 2),
+            'all_sonnet_5': round(calculate_cost(total_budget, 'claude-sonnet-5'), 2),
         },
     }, indent=2))
 
@@ -338,7 +349,7 @@ def cmd_record(args: argparse.Namespace) -> None:
     phase_data['tokens_used'] += args.tokens
     phase_data['invocations'] += 1
 
-    model = args.model or 'claude-opus-4-7'
+    model = args.model or DEFAULT_MODEL
     by_model = phase_data.get('by_model', {})
     by_model[model] = by_model.get(model, 0) + args.tokens
     phase_data['by_model'] = by_model
