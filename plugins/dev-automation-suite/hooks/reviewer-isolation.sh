@@ -61,11 +61,19 @@ transcripts are out of bounds and reads against them are denied."""
 
 #: Paths that hold the record of how the work was produced. The reviewer keeps
 #: the rest of the repository — the artifact under review is not a secret.
+#:
+#: The last rule is scoped to `.claude/`, not to the extension. It was
+#: `\.jsonl$`, which denied every .jsonl anywhere: transcripts are jsonl, but so
+#: is an ordinary project audit trail, and a host that keeps its gate records in
+#: .jsonl had them blanket-denied to the reviewer. The concern is transcripts,
+#: and transcripts live under `.claude/` — the two rules above already cover the
+#: known locations, and this covers the rest of that tree without reaching
+#: outside it.
 DENIED = re.compile(
     r'(^|/)\.dev-suite(/|$)'
     r'|(^|/)\.claude/projects(/|$)'
     r'|/subagents/'
-    r'|\.jsonl$',
+    r'|(^|/)\.claude/.*\.jsonl$',
 )
 
 #: Bash is denied only when the command line reaches into those same paths;
