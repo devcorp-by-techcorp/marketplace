@@ -951,6 +951,78 @@ class TestReviewPacket(unittest.TestCase):
             review_packet.load_task(str(Path(tempfile.mkdtemp())))
 
 
+class TestTokenBudgetTags(unittest.TestCase):
+    """`--tag` attribution, ported forward from automate-dev v1.1.0.
+
+    The suite dropped tags when it dropped agent-teams. Bringing the subsystem
+    back brings the requirement back with it: `agent-teams-integration.md` and
+    `token-budgeting.md` both invoke `--tag team:<name>`, and without it a team
+    run cannot be costed apart from the phase it ran inside.
+    """
+
+    MONITOR = SCRIPTS / 'token_budget_monitor.py'
+
+    def _run(self, *args: str) -> dict:
+        result = subprocess.run(
+            [sys.executable, str(self.MONITOR), *args],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertIn(result.returncode, (0, 2), result.stderr)
+        return json.loads(result.stdout)
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+        subprocess.run(
+            [sys.executable, str(self.MONITOR), 'init', self.root,
+             '--difficulty', 'medium'],
+            capture_output=True, text=True, check=True,
+        )
+
+    def test_tag_accumulates_across_records_and_models(self):
+        first = self._run('record', self.root, '--phase', 'review',
+                          '--tokens', '1000', '--model', 'claude-opus-5',
+                          '--tag', 'team:review-team')
+        self.assertEqual(first['tag'], 'team:review-team')
+        self.assertEqual(first['tag_total'], 1000)
+
+        second = self._run('record', self.root, '--phase', 'review',
+                           '--tokens', '500', '--model', 'claude-sonnet-5',
+                           '--tag', 'team:review-team')
+        self.assertEqual(second['tag_total'], 1500)
+
+        by_tag = self._run('summary', self.root)['by_tag']['team:review-team']
+        self.assertEqual(by_tag['tokens'], 1500)
+        self.assertEqual(by_tag['invocations'], 2)
+        self.assertEqual(by_tag['by_model'],
+                         {'claude-opus-5': 1000, 'claude-sonnet-5': 500})
+
+    def test_untagged_record_emits_no_tag_keys(self):
+        """A caller that passed no --tag sees no tag keys, not nulls."""
+        out = self._run('record', self.root, '--phase', 'test', '--tokens', '100')
+        self.assertEqual([k for k in out if 'tag' in k], [])
+
+    def test_summary_filters_to_one_tag(self):
+        for phase, tag in (('review', 'team:review-team'), ('build', 'team:build-team')):
+            self._run('record', self.root, '--phase', phase, '--tokens', '100',
+                      '--tag', tag)
+        self.assertEqual(
+            sorted(self._run('summary', self.root)['by_tag']),
+            ['team:build-team', 'team:review-team'])
+        self.assertEqual(
+            list(self._run('summary', self.root, '--tag', 'team:build-team')['by_tag']),
+            ['team:build-team'])
+
+    def test_port_left_pricing_and_default_model_intact(self):
+        """The port must not disturb what the suite version added over v1.1.0."""
+        sys.path.insert(0, str(SCRIPTS))
+        import token_budget_monitor as monitor
+        self.assertEqual(monitor.DEFAULT_MODEL, 'claude-opus-5')
+        for model in ('claude-opus-5', 'claude-sonnet-5'):
+            self.assertIn(model, monitor.MODEL_PRICING)
+
+
 class TestReviewerIsolation(unittest.TestCase):
     """The packet controls what the reviewer is handed; this controls what it
     can reach. A reviewer given a clean packet that can open the author's

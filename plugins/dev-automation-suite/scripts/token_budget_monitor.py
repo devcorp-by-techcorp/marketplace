@@ -12,9 +12,13 @@ over from an earlier deployment is a guess, not a measurement.
 Usage:
     python token_budget_monitor.py init <project_root> [--total-budget N] [--difficulty LEVEL]
     python token_budget_monitor.py check <project_root> --phase NAME [--requested N]
-    python token_budget_monitor.py record <project_root> --phase NAME --tokens N [--model MODEL]
-    python token_budget_monitor.py summary <project_root>
-    python token_budget_monitor.py report <project_root>
+    python token_budget_monitor.py record <project_root> --phase NAME --tokens N [--model MODEL] [--tag TAG]
+    python token_budget_monitor.py summary <project_root> [--tag TAG]
+    python token_budget_monitor.py report <project_root> [--tag TAG]
+
+Tags (e.g. `team:review-team`) attribute usage to a team, iteration, or
+other context, so an agent-teams run can be costed apart from the phase
+it ran inside.
     python token_budget_monitor.py reset <project_root>
 """
 
@@ -90,6 +94,11 @@ class PhaseUsage:
     tokens_used: int = 0
     invocations: int = 0
     by_model: dict = field(default_factory=dict)
+    #: Optional free-form attribution, e.g. `team:review-team`. Lets an
+    #: agent-teams run account for its own cost separately from the phase
+    #: total, which is the only way to tell an expensive team from an
+    #: expensive phase.
+    by_tag: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -354,6 +363,18 @@ def cmd_record(args: argparse.Namespace) -> None:
     by_model[model] = by_model.get(model, 0) + args.tokens
     phase_data['by_model'] = by_model
 
+    tag = getattr(args, 'tag', None)
+    if tag:
+        by_tag = phase_data.get('by_tag', {})
+        tag_entry = by_tag.get(tag) or {'tokens': 0, 'invocations': 0, 'by_model': {}}
+        tag_entry['tokens'] += args.tokens
+        tag_entry['invocations'] += 1
+        tag_by_model = tag_entry.get('by_model', {})
+        tag_by_model[model] = tag_by_model.get(model, 0) + args.tokens
+        tag_entry['by_model'] = tag_by_model
+        by_tag[tag] = tag_entry
+        phase_data['by_tag'] = by_tag
+
     state.total_used += args.tokens
     state.status = determine_status(state.total_used, state.total_budget)
 
@@ -379,7 +400,10 @@ def cmd_record(args: argparse.Namespace) -> None:
     total_pct = (state.total_used / state.total_budget * 100
                  if state.total_budget else 0)
 
-    print(json.dumps({
+    # Built as a variable rather than printed inline: the tag fields below are
+    # conditional, and a caller that passed no --tag must see no tag keys at
+    # all rather than nulls.
+    result = {
         'status': 'RECORDED',
         'phase': args.phase,
         'tokens_added': args.tokens,
@@ -392,9 +416,34 @@ def cmd_record(args: argparse.Namespace) -> None:
         'total_pct': round(total_pct, 1),
         'overall_status': state.status,
         'estimated_cost_usd': round(calculate_cost(args.tokens, model), 4),
-    }, indent=2))
+    }
+    if tag:
+        result['tag'] = tag
+        result['tag_total'] = phase_data['by_tag'][tag]['tokens']
+    print(json.dumps(result, indent=2))
 
     sys.exit(2 if state.status in ('OVER_BUDGET', 'CRITICAL') else 0)
+
+
+def _aggregate_tags(state: BudgetState, tag_filter: Optional[str] = None) -> dict:
+    """Aggregate tag usage across all phases, optionally filtered to one tag."""
+    aggregated: dict = {}
+    for phase_name, phase_data in state.phases.items():
+        for tag, entry in phase_data.get('by_tag', {}).items():
+            if tag_filter and tag != tag_filter:
+                continue
+            summary = aggregated.setdefault(tag, {
+                'tokens': 0, 'invocations': 0, 'by_phase': {}, 'by_model': {},
+            })
+            summary['tokens'] += entry['tokens']
+            summary['invocations'] += entry['invocations']
+            summary['by_phase'][phase_name] = {
+                'tokens': entry['tokens'],
+                'invocations': entry['invocations'],
+            }
+            for model, tokens in entry.get('by_model', {}).items():
+                summary['by_model'][model] = summary['by_model'].get(model, 0) + tokens
+    return aggregated
 
 
 def cmd_summary(args: argparse.Namespace) -> None:
@@ -430,6 +479,10 @@ def cmd_summary(args: argparse.Namespace) -> None:
             'pct': round(phase_pct, 1),
             'invocations': phase_data['invocations'],
         }
+
+    tag_summary = _aggregate_tags(state, getattr(args, 'tag', None))
+    if tag_summary:
+        summary['by_tag'] = tag_summary
 
     print(json.dumps(summary, indent=2))
 
@@ -493,6 +546,7 @@ def cmd_report(args: argparse.Namespace) -> None:
             'percentage': round(phase_pct, 1),
             'invocations': phase_data['invocations'],
             'by_model': phase_data.get('by_model', {}),
+            'by_tag': phase_data.get('by_tag', {}),
         }
 
     print(json.dumps(report, indent=2))
@@ -561,14 +615,17 @@ def main():
     record_parser.add_argument('--phase', required=True, help='Phase name')
     record_parser.add_argument('--tokens', type=int, required=True, help='Tokens used')
     record_parser.add_argument('--model', help='Model used (affects cost calculation)')
+    record_parser.add_argument('--tag', help='Attribution tag, e.g. team:review-team')
 
     # summary
     summary_parser = subparsers.add_parser('summary', help='Show current usage summary')
     summary_parser.add_argument('project_root', help='Project root directory')
+    summary_parser.add_argument('--tag', help='Restrict tag breakdown to one tag')
 
     # report
     report_parser = subparsers.add_parser('report', help='Generate detailed report')
     report_parser.add_argument('project_root', help='Project root directory')
+    report_parser.add_argument('--tag', help='Restrict tag breakdown to one tag')
 
     # reset
     reset_parser = subparsers.add_parser('reset', help='Reset budget tracking')
