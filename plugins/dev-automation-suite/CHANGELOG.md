@@ -4,6 +4,26 @@ All notable changes to the dev-automation-suite.
 
 Format follows Keep a Changelog. Versioning is semantic.
 
+## [3.3.3] — 2026-08-17
+
+### Fixed
+
+- `reviewer-isolation.sh` denied the reviewer every `.jsonl` file, anywhere.
+  The rule was written as an extension match (`\.jsonl$`) to catch agent
+  transcripts, but transcripts are not the only thing kept in jsonl: a host
+  project whose gate records, subagent log and session log are `.jsonl` had its
+  entire audit trail blanket-denied. That withheld files the reviewer is
+  entitled to while revealing nothing about the work process — the transcripts
+  themselves were already covered by the `.claude/projects` and `/subagents/`
+  path rules.
+
+  Narrowed to `(^|/)\.claude/.*\.jsonl$`: still denied throughout the
+  `.claude/` tree, where transcripts live, and no longer reaching outside it.
+  Pinned by two tests — one that a host audit trail is readable (fails against
+  the old rule), one that jsonl under `.claude/` is still denied.
+
+  Found against a host whose whole governance layer records to jsonl.
+
 ## [3.3.2] — 2026-08-15
 
 Three defects in the independent-review machinery, found by automated review on
