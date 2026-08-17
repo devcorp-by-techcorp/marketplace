@@ -4,6 +4,45 @@ All notable changes to the dev-automation-suite.
 
 Format follows Keep a Changelog. Versioning is semantic.
 
+## [3.4.0] — 2026-08-17
+
+Absorbs the agent-teams subsystem from the predecessor `automate-dev` v1.1.0,
+which is retired from its host at `.claude/skills/automate-dev/` in the same
+change. Three things worth reading before the next migration.
+
+### Added
+
+- **Mode 3 agent-teams, 30 files.** Four team agents (`team-lead`,
+  `team-implementer`, `team-reviewer`, `team-debugger`), seven `/team-*`
+  commands, six team skills with their references, two workflow docs, and the
+  two reference docs that tie them to the solo agents. v1.1.0 had no successor
+  for any of it in this package — the capability would have been lost outright
+  had the host's embedded copy simply been deleted.
+
+- **`--tag` on `token_budget_monitor.py`,** ported forward from v1.1.0. Tags
+  (`--tag team:review-team`) attribute usage to a team, iteration or other
+  context, which is the only way to tell an expensive team from an expensive
+  phase. This package had dropped tags when it dropped agent-teams; bringing
+  the subsystem back brings the requirement with it, since
+  `agent-teams-integration.md` and `token-budgeting.md` both invoke them.
+  Available on `record`, `summary` and `report`.
+
+  The port does not touch the Opus 5 / Sonnet 5 pricing table or the
+  `DEFAULT_MODEL` fallback, which is what this package had over v1.1.0 —
+  neither file was a superset of the other. A test asserts both survive.
+
+### Note for future migrations — team skills live at `agent-teams/skills/`
+
+Not at the package root. **A root `skills/` directory suppresses root
+`SKILL.md` autoload**, so placing them there silently disables the entire suite
+skill: the package still validates, every path reference still resolves, and
+nothing appears wrong. The first attempt at this migration did exactly that.
+
+It was caught only by `test_skill_md_at_root_for_single_skill_autoload`, which
+pins the constraint — no reference sweep detects it, because nothing is
+missing. Reach for `skills/` again and the same test will fail again; that is
+the intent, and the test should not be relaxed to accommodate a migration.
+
 ## [3.3.2] — 2026-08-15
 
 Three defects in the independent-review machinery, found by automated review on
