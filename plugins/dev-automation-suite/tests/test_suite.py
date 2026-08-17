@@ -1062,6 +1062,28 @@ class TestReviewerIsolation(unittest.TestCase):
             self._decision(self._pre('Bash', {'command': 'cat .dev-suite/logs/*.log'})),
             'deny')
 
+    def test_reviewer_keeps_a_host_audit_trail_in_jsonl(self):
+        """A host that keeps gate records in .jsonl still gets them.
+
+        The rule was once `\\.jsonl$`, which denied the extension anywhere.
+        Transcripts are jsonl, but so is an ordinary project audit trail, and
+        denying those tells the reviewer nothing about the work process while
+        withholding files it is entitled to.
+        """
+        for path in ('/p/.orchestrator/reports/gates/gates-2026-08.jsonl',
+                     '/p/.orchestrator/projects/state/s/memory/session/task/activity.jsonl',
+                     '/p/reports/sessions/log.jsonl'):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    self._decision(self._pre('Read', {'file_path': path})), 'allow')
+
+    def test_reviewer_still_cannot_read_jsonl_under_dot_claude(self):
+        """Narrowed to `.claude/`, not dropped: that is where transcripts live."""
+        self.assertEqual(
+            self._decision(self._pre(
+                'Read', {'file_path': '/home/u/.claude/history/session.jsonl'})),
+            'deny')
+
     def test_reviewer_keeps_the_codebase(self):
         """Reviewing a diff means reading the code around it."""
         self.assertEqual(

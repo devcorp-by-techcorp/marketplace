@@ -27,7 +27,7 @@
     ],
     "phases": 11,
     "scripts": 19,
-    "regressionTests": 130,
+    "regressionTests": 136,
     "runtimeDependencies": "none \u2014 Python 3.8+ standard library and Bash only",
     "externalServices": "none \u2014 local files and CLI only"
   }
